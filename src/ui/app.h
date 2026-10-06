@@ -18,13 +18,31 @@ struct SDL_Window;
 union SDL_Event;
 struct ImGuiIO;
 struct ImVec2;
+struct ImGuiContext;
+struct HostWindow;
 typedef void* SDL_GLContext;
 
 class App {
 public:
 	void set_input_recorder_config(const InputRecorder::Config& config);
-	bool init();
+	// With a host window, the app runs inside it (shared with VibeStation 2)
+	// instead of creating its own window, GL context and SDL instance.
+	bool init(const HostWindow* host = nullptr);
 	void run();
+	// run() split up, so a host can interleave the two apps:
+	// begin_run() once, then frame() until it returns false (quit).
+	bool begin_run();
+	bool frame();
+	// The host switched to or away from this app.
+	void on_activated();
+	void on_deactivated();
+	// True once, after the user confirmed switching to VibeStation 2 and the
+	// screen has faded to black.
+	bool take_vs2_switch_request();
+	// Starts the switch as if the warning had been confirmed (--switch-test).
+	void begin_vs2_switch();
+	// A PS1 disc chosen in VibeStation 2: boot it here (after a switch back).
+	void boot_disc_from_vs2(const std::string& path);
 	void shutdown();
 	bool launch_disc_from_cli(const std::string& bios_path,
 		const std::string& disc_path, bool direct_boot);
@@ -33,6 +51,20 @@ public:
 private:
 	SDL_Window* window_ = nullptr;
 	SDL_GLContext gl_context_ = nullptr;
+	bool hosted_ = false;
+	ImGuiContext* imgui_context_ = nullptr;
+	// frame() loop state (formerly locals of run()).
+	unsigned long long perf_freq_ = 0;
+	double target_frame_sec_ = 1.0 / 60.0;
+	// Switching to VibeStation 2: experimental warning, then a fade to black.
+	bool vs2_warning_open_ = false;
+	float vs2_warning_anim_ = 0.0f;
+	float vs2_fade_out_ = -1.0f;   // < 0 idle, else seconds into the fade
+	float activation_fade_ = 0.0f; // 1 = black, fades in after a switch back
+	bool vs2_switch_requested_ = false;
+	void draw_vs2_switch_overlay();
+	bool create_own_window();
+	bool init_imgui();
 	const char* imgui_glsl_version_ = "#version 330";
 	bool use_imgui_opengl2_backend_ = false;
 
@@ -82,6 +114,15 @@ private:
 	bool gameplay_exit_transition_active_ = false;
 	bool gameplay_exit_transition_switched_ = false;
 	float gameplay_exit_transition_elapsed_ = 0.0f;
+	// Toolbar Stop ends the session; Exit keeps it paused behind the launcher,
+	// which then offers Resume Emulation (session_suspended_).
+	bool gameplay_exit_stops_ = true;
+	bool session_suspended_ = false;
+	void exit_gameplay_to_launcher(bool stop);
+	// Ends the launcher startup sequence at once (a game booted from VS2).
+	void skip_definitive_startup();
+	std::string pending_vs2_disc_{};
+	void boot_pending_vs2_disc();
 	bool show_corruption_presets_ = false;
 	bool show_bindings_config_ = false;
 	bool show_fmv_diagnostics_ = false;

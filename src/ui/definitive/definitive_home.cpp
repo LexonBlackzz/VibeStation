@@ -23,7 +23,7 @@ namespace {
 constexpr float kDesignWidth = 1280.0f;
 constexpr float kDesignHeight = 800.0f;
 
-std::array<bool, 6> g_menu_was_engaged = {};
+std::array<bool, 7> g_menu_was_engaged = {};
 
 struct LauncherQuote {
     const char* line1;
@@ -84,12 +84,13 @@ constexpr std::array<LauncherQuote, 48> kLauncherQuotes = {{
 size_t g_launcher_quote_index = 0;
 bool g_launcher_quote_selected = false;
 
-std::array<float, 6> g_menu_highlight_mix = {};
+std::array<float, 7> g_menu_highlight_mix = {};
 
 enum class LauncherStartTransition {
     None,
     Bios,
-    Disc
+    Disc,
+    Resume
 };
 
 LauncherStartTransition g_launcher_start_transition =
@@ -97,18 +98,32 @@ LauncherStartTransition g_launcher_start_transition =
 float g_launcher_start_transition_elapsed = 0.0f;
 constexpr float kLauncherStartFadeSeconds = 0.42f;
 
-float g_launcher_intro_elapsed = 0.0f;
-bool g_launcher_intro_complete = false;
-float g_launcher_ui_intro_elapsed = 0.0f;
-bool g_launcher_ui_intro_complete = false;
-float g_launcher_background_fade_elapsed = 0.0f;
-bool g_launcher_background_fade_complete = false;
+// Startup runs on one clock (definitive_shared.h): intro, then the title
+// glides into place while the launcher arrives underneath it.
+float g_startup_elapsed = 0.0f;
+bool g_startup_complete = false;
+// The disclaimer shown before the startup sequence (once per run).
+float g_disclaimer_elapsed = 0.0f;
+bool g_disclaimer_done = false;
 
-// This animation is deliberately independent from the boot timer. It begins
-// on the frame after the boot sequence ends so the launcher never initializes
-// invisibly behind the startup logo.
-constexpr float kLauncherUiIntroDuration = 1.68f;
-constexpr float kLauncherBackgroundFadeDuration = 0.72f;
+// Launcher arrival, in seconds on the startup clock.
+constexpr float kRowsStart = definitive_ui::kIntroGlideStart + 0.35f;
+constexpr float kRowStagger = 0.06f;
+constexpr float kRowDuration = 0.6f;
+constexpr float kRowSlide = 32.0f;
+constexpr float kMetaStart = definitive_ui::kIntroGlideStart + 0.55f;
+constexpr float kPanelsStart = kRowsStart + 0.45f;
+constexpr float kPanelStagger = 0.1f;
+constexpr float kPanelDuration = 0.7f;
+constexpr float kPanelRise = 20.0f;
+constexpr float kPhotoStart = definitive_ui::kIntroGlideStart + 0.6f;
+constexpr float kPhotoZoom = 1.08f;
+// After the last row lands, a highlight slides onto Start Emulation. It is a
+// hint only: it goes once anything is hovered or focused.
+constexpr float kIntroHighlightStart = definitive_ui::kLauncherInteractiveAt - 0.12f;
+constexpr float kIntroHighlightDuration = 0.45f;
+float g_intro_highlight = 0.0f;
+bool g_intro_highlight_dismissed = false;
 
 
 ImU32 rgba(int r, int g, int b, int a = 255) {
@@ -251,130 +266,6 @@ Layout make_layout(const ImVec2& window_pos, const ImVec2& window_size) {
     return layout;
 }
 
-void draw_launcher_initialization_overlay(
-    const ImVec2& pos, const ImVec2& size, float elapsed) {
-    ImDrawList* overlay = ImGui::GetForegroundDrawList();
-    const Layout layout = make_layout(pos, size);
-
-    // The first launcher frame starts fully black, then the entire UI fades
-    // into view. This is separate from the individual brand/menu/panel wipes,
-    // so nothing can pop in abruptly on the frame after the boot intro ends.
-    const float ui_fade =
-        timeline_progress(elapsed, 0.00f, 0.62f);
-    const int ui_black_alpha =
-        glow_alpha(255.0f * (1.0f - ui_fade));
-    if (ui_black_alpha > 0) {
-        overlay->AddRectFilled(
-            pos,
-            ImVec2(pos.x + size.x, pos.y + size.y),
-            rgba(0, 0, 0, ui_black_alpha));
-    }
-
-    // UI pieces assemble over a fully black background. The photograph fades
-    // in only after every launcher element has completed this animation.
-    const float brand_reveal =
-        timeline_progress(elapsed, 0.10f, 0.68f);
-    const ImVec2 brand0 = layout.point(24.0f, 18.0f);
-    const ImVec2 brand1 = layout.point(460.0f, 156.0f);
-    if (brand_reveal < 1.0f) {
-        const float wipe_y =
-            brand1.y - (brand1.y - brand0.y) * brand_reveal;
-        overlay->AddRectFilled(
-            brand0,
-            ImVec2(brand1.x, wipe_y),
-            rgba(0, 0, 0, 255));
-        overlay->AddLine(
-            ImVec2(brand0.x, wipe_y),
-            ImVec2(brand1.x, wipe_y),
-            rgba(185, 210, 232,
-                glow_alpha(92.0f * brand_reveal)),
-            layout.px(1.0f));
-    }
-
-    // Version/quote block trails the brand slightly.
-    const float meta_reveal =
-        timeline_progress(elapsed, 0.24f, 0.72f);
-    if (meta_reveal < 1.0f) {
-        overlay->AddRectFilled(
-            layout.point(1010.0f, 18.0f),
-            layout.point(1252.0f, 118.0f),
-            rgba(0, 0, 0,
-                glow_alpha(255.0f * (1.0f - meta_reveal))));
-    }
-
-    // Main actions appear one-by-one from top to bottom.
-    constexpr float kMenuX = 30.0f;
-    constexpr float kMenuY = 194.0f;
-    constexpr float kMenuW = 410.0f;
-    constexpr float kMenuH = 59.0f;
-    constexpr float kMenuStep = 60.0f;
-
-    for (int i = 0; i < 6; ++i) {
-        const float start =
-            0.34f + static_cast<float>(i) * 0.09f;
-        const float reveal =
-            timeline_progress(elapsed, start, start + 0.42f);
-
-        const ImVec2 row0 =
-            layout.point(kMenuX, kMenuY + kMenuStep * i);
-        const ImVec2 row1 =
-            layout.point(
-                kMenuX + kMenuW,
-                kMenuY + kMenuStep * i + kMenuH);
-
-        if (reveal < 1.0f) {
-            const float wipe_x =
-                row0.x + (row1.x - row0.x) * reveal;
-
-            overlay->AddRectFilled(
-                ImVec2(wipe_x, row0.y),
-                row1,
-                rgba(0, 0, 0, 255));
-
-            const int veil =
-                glow_alpha(150.0f * (1.0f - reveal));
-            if (veil > 0) {
-                overlay->AddRectFilled(
-                    row0,
-                    ImVec2(wipe_x, row1.y),
-                    rgba(0, 0, 0, veil));
-            }
-        }
-    }
-
-    // Bottom cards arrive last, with the system card just behind the library.
-    const std::array<ImVec4, 2> panels = {{
-        ImVec4(32.0f, 585.0f, 840.0f, 768.0f),
-        ImVec4(854.0f, 585.0f, 1248.0f, 768.0f),
-    }};
-    for (size_t i = 0; i < panels.size(); ++i) {
-        const float start =
-            0.88f + static_cast<float>(i) * 0.10f;
-        const float reveal =
-            timeline_progress(elapsed, start, start + 0.46f);
-        if (reveal >= 1.0f) {
-            continue;
-        }
-
-        const ImVec4& p = panels[i];
-        const ImVec2 p0 = layout.point(p.x, p.y);
-        const ImVec2 p1 = layout.point(p.z, p.w);
-        const float wipe_y =
-            p1.y - (p1.y - p0.y) * reveal;
-
-        overlay->AddRectFilled(
-            p0,
-            ImVec2(p1.x, wipe_y),
-            rgba(0, 0, 0, 255));
-        overlay->AddRectFilled(
-            ImVec2(p0.x, wipe_y),
-            p1,
-            rgba(0, 0, 0,
-                glow_alpha(145.0f * (1.0f - reveal))));
-    }
-}
-
-
 void add_text(ImDrawList* draw, const Layout& layout, float x, float y,
     float size, ImU32 color, const char* text) {
     const float font_size = layout.px(size);
@@ -402,6 +293,7 @@ enum class MenuIcon {
     Chip,
     Skull,
     Settings,
+    Orbit,
     Exit
 };
 
@@ -481,6 +373,20 @@ void draw_icon(ImDrawList* draw, const Layout& layout, MenuIcon icon,
             draw->AddLine(a0, a1, color, 2.0f * s);
         }
         break;
+    case MenuIcon::Orbit: {
+        // VibeStation 2's orbiting lights: a tilted ring with three of them.
+        const ImVec2 c(p.x + 13.0f * s, p.y + 14.0f * s);
+        draw->AddEllipse(c, ImVec2(12.0f * s, 6.5f * s), color, -0.42f, 24, 1.4f * s);
+        static constexpr float kAngles[] = {0.4f, 2.5f, 4.4f};
+        for (const float a : kAngles) {
+            const float ex = 12.0f * s * std::cos(a), ey = 6.5f * s * std::sin(a);
+            const float cr = std::cos(-0.42f), sr = std::sin(-0.42f);
+            draw->AddCircleFilled(ImVec2(c.x + ex * cr - ey * sr, c.y + ex * sr + ey * cr),
+                                  2.6f * s, color, 10);
+        }
+        draw->AddCircleFilled(c, 2.0f * s, color, 10);
+        break;
+    }
     case MenuIcon::Exit:
         draw->AddRect(
             ImVec2(p.x + 8.0f * s, p.y + 2.0f * s),
@@ -506,10 +412,10 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
     MenuIcon icon, const char* title, const char* subtitle,
     bool interaction_enabled = true) {
     constexpr float kX = 36.0f;
-    constexpr float kY = 198.0f;
+    constexpr float kY = 168.0f;
     constexpr float kWidth = 396.0f;
-    constexpr float kHeight = 54.0f;
-    constexpr float kGap = 6.0f;
+    constexpr float kHeight = 50.0f;
+    constexpr float kGap = 4.0f;
 
     const float y = kY + index * (kHeight + kGap);
     const ImVec2 p = layout.point(kX, y);
@@ -548,6 +454,17 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
         highlight_mix = 0.0f;
     }
 
+    // Startup hint on Start Emulation: the highlight grows in from the left.
+    // Touching any item ends it, and the item then fades as usual.
+    if (engaged) {
+        g_intro_highlight_dismissed = true;
+    }
+    float box_w = size.x;
+    if (index == 0 && !g_intro_highlight_dismissed) {
+        highlight_mix = std::max(highlight_mix, g_intro_highlight);
+        box_w = size.x * std::max(0.02f, g_intro_highlight);
+    }
+
     const float pulse = engaged
         ? (0.92f + 0.08f *
             std::sin(static_cast<float>(ImGui::GetTime()) * 2.1f))
@@ -559,9 +476,9 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
         const float glow_outer = layout.px(6.0f + glow * 2.0f);
         const float glow_mid = layout.px(3.0f + glow);
         const ImVec2 outer0(p.x - glow_outer, p.y - glow_outer);
-        const ImVec2 outer1(p.x + size.x + glow_outer, p.y + size.y + glow_outer);
+        const ImVec2 outer1(p.x + box_w + glow_outer, p.y + size.y + glow_outer);
         const ImVec2 mid0(p.x - glow_mid, p.y - glow_mid);
-        const ImVec2 mid1(p.x + size.x + glow_mid, p.y + size.y + glow_mid);
+        const ImVec2 mid1(p.x + box_w + glow_mid, p.y + size.y + glow_mid);
 
         draw->AddRect(outer0, outer1,
             definitive_accent_color(
@@ -577,17 +494,17 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
         const int fill_alpha =
             glow_alpha(116.0f * highlight_mix + (hovered ? 10.0f : 0.0f));
         draw->AddRectFilled(
-            p, ImVec2(p.x + size.x, p.y + size.y),
+            p, ImVec2(p.x + box_w, p.y + size.y),
             definitive_surface_color(rgba(12, 17, 23, fill_alpha), 0.90f));
 
         draw->AddRect(
-            p, ImVec2(p.x + size.x, p.y + size.y),
+            p, ImVec2(p.x + box_w, p.y + size.y),
             definitive_accent_color(
                 rgba(211, 229, 246, glow_alpha(235.0f * highlight_mix))),
             0.0f, 0, layout.px(1.35f));
         draw->AddRect(
             ImVec2(p.x + layout.px(2.0f), p.y + layout.px(2.0f)),
-            ImVec2(p.x + size.x - layout.px(2.0f),
+            ImVec2(p.x + box_w - layout.px(2.0f),
                 p.y + size.y - layout.px(2.0f)),
             definitive_accent_color(
                 rgba(103, 154, 205, glow_alpha(128.0f * highlight_mix))),
@@ -616,11 +533,11 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
 
     const float content_shift = 2.0f * highlight_mix;
     draw_icon(draw, layout, icon,
-        kX + 24.0f + content_shift, y + 13.0f,
+        kX + 24.0f + content_shift, y + 11.0f,
         definitive_text_color(main_color));
-    add_text(draw, layout, kX + 72.0f + content_shift, y + 7.0f, 18.5f,
+    add_text(draw, layout, kX + 72.0f + content_shift, y + 6.0f, 18.5f,
         main_color, title);
-    add_text(draw, layout, kX + 72.0f + content_shift, y + 33.0f, 11.5f,
+    add_text(draw, layout, kX + 72.0f + content_shift, y + 31.0f, 11.5f,
         sub_color, subtitle);
 
     ImGui::PopID();
@@ -692,6 +609,14 @@ void draw_info_badge(ImDrawList* draw, const Layout& layout, float x, float y) {
 }
 }
 
+void App::skip_definitive_startup() {
+    definitive_ui::skip_startup_sound();
+    g_disclaimer_done = true;
+    g_startup_elapsed = definitive_ui::kLauncherSequenceEnd;
+    g_startup_complete = true;
+    g_intro_highlight_dismissed = true;
+}
+
 void App::release_definitive_ui_assets() {
     definitive_ui::release_audio_assets();
     g_menu_was_engaged.fill(false);
@@ -702,12 +627,12 @@ void App::release_definitive_ui_assets() {
     definitive_ui::release_gameplay_ambient_assets();
     g_launcher_start_transition = LauncherStartTransition::None;
     g_launcher_start_transition_elapsed = 0.0f;
-    g_launcher_intro_elapsed = 0.0f;
-    g_launcher_intro_complete = false;
-    g_launcher_ui_intro_elapsed = 0.0f;
-    g_launcher_ui_intro_complete = false;
-    g_launcher_background_fade_elapsed = 0.0f;
-    g_launcher_background_fade_complete = false;
+    g_startup_elapsed = 0.0f;
+    g_startup_complete = false;
+    g_disclaimer_elapsed = 0.0f;
+    g_disclaimer_done = false;
+    g_intro_highlight = 0.0f;
+    g_intro_highlight_dismissed = false;
     definitive_settings_transition_ =
         DefinitiveSettingsTransition::Closed;
     definitive_settings_transition_elapsed_ = 0.0f;
@@ -719,86 +644,51 @@ void App::panel_definitive_home() {
     const ImVec2 window_pos = ImGui::GetWindowPos();
     const ImVec2 window_size = ImGui::GetWindowSize();
 
-    definitive_ui::play_startup_sound();
+    const float dt = std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
 
-    if (!g_launcher_intro_complete) {
+    // A short non-affiliation notice comes first, before any Sony-style
+    // presentation; the startup clock and sound wait for it.
+    if (!g_disclaimer_done) {
+        definitive_ui::preload_intro_assets();
+        definitive_ui::preload_background_assets();
+        definitive_ui::preload_audio_assets();
+        definitive_ui::draw_startup_disclaimer(
+            window_pos, window_size, g_disclaimer_elapsed);
+        g_disclaimer_elapsed += dt;
+        if (g_disclaimer_elapsed >= definitive_ui::kStartupDisclaimerSeconds) {
+            g_disclaimer_done = true;
+        }
+        return;
+    }
+
+    definitive_ui::play_startup_sound();
+    if (!g_startup_complete) {
+        // Space, Enter, A or a click skips to the glide. The launcher is not
+        // clickable until well after that, so the same press cannot land on
+        // a button underneath.
         const bool skip_intro =
-            ImGui::IsKeyPressed(ImGuiKey_Space, false) ||
-            ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
-            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false);
+            g_startup_elapsed < definitive_ui::kIntroGlideStart &&
+            (ImGui::IsKeyPressed(ImGuiKey_Space, false) ||
+                ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+                ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
+                ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false) ||
+                ImGui::IsMouseClicked(ImGuiMouseButton_Left));
 
         if (skip_intro) {
             definitive_ui::stop_startup_sound();
-
-            // End the intro on this frame and return once so the same keypress
-            // cannot also activate a launcher button underneath it.
-            g_launcher_intro_elapsed = definitive_ui::kLauncherIntroDuration;
-            g_launcher_intro_complete = true;
-            g_launcher_ui_intro_elapsed = 0.0f;
-            g_launcher_ui_intro_complete = false;
-            g_launcher_background_fade_elapsed = 0.0f;
-            g_launcher_background_fade_complete = false;
-            definitive_ui::preload_background_assets();
-            definitive_ui::draw_intro_presentation(
-                window_pos, window_size, g_launcher_intro_elapsed);
-            return;
+            g_startup_elapsed = definitive_ui::kIntroGlideStart;
         }
-
-        const float dt = std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
-        g_launcher_intro_elapsed += dt;
-        if (g_launcher_intro_elapsed >= definitive_ui::kLauncherIntroDuration) {
-            g_launcher_intro_elapsed = definitive_ui::kLauncherIntroDuration;
-            g_launcher_intro_complete = true;
-            definitive_ui::draw_intro_presentation(
-                window_pos, window_size, g_launcher_intro_elapsed);
-            return;
+        else {
+            g_startup_elapsed += dt;
+        }
+        if (g_startup_elapsed >= definitive_ui::kLauncherSequenceEnd) {
+            g_startup_elapsed = definitive_ui::kLauncherSequenceEnd;
+            g_startup_complete = true;
         }
     }
-
-    const bool launcher_intro_active = !g_launcher_intro_complete;
-
-    if (g_launcher_intro_complete && !g_launcher_ui_intro_complete) {
-        const float dt =
-            std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
-        g_launcher_ui_intro_elapsed += dt;
-        if (g_launcher_ui_intro_elapsed >= kLauncherUiIntroDuration) {
-            g_launcher_ui_intro_elapsed = kLauncherUiIntroDuration;
-            g_launcher_ui_intro_complete = true;
-        }
-    }
-
-    if (g_launcher_ui_intro_complete &&
-        !g_launcher_background_fade_complete) {
-        const float dt =
-            std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
-        g_launcher_background_fade_elapsed += dt;
-        if (g_launcher_background_fade_elapsed >=
-            kLauncherBackgroundFadeDuration) {
-            g_launcher_background_fade_elapsed =
-                kLauncherBackgroundFadeDuration;
-            g_launcher_background_fade_complete = true;
-        }
-    }
-
-    const bool launcher_ui_initializing =
-        g_launcher_intro_complete && !g_launcher_ui_intro_complete;
-    const bool launcher_background_fading =
-        g_launcher_ui_intro_complete &&
-        !g_launcher_background_fade_complete;
+    const float startup = g_startup_elapsed;
     const bool launcher_ready =
-        g_launcher_intro_complete &&
-        g_launcher_ui_intro_complete &&
-        g_launcher_background_fade_complete;
-
-    const float launcher_background_alpha =
-        !g_launcher_ui_intro_complete
-            ? 0.0f
-            : (g_launcher_background_fade_complete
-                ? 1.0f
-                : smoothstep01(std::clamp(
-                    g_launcher_background_fade_elapsed /
-                        kLauncherBackgroundFadeDuration,
-                    0.0f, 1.0f)));
+        startup >= definitive_ui::kLauncherInteractiveAt;
 
     if (!g_launcher_quote_selected) {
         const Uint64 entropy =
@@ -815,20 +705,35 @@ void App::panel_definitive_home() {
     definitive_ui::preload_intro_assets();
     definitive_ui::preload_audio_assets();
 
-    if (launcher_intro_active) {
+    Layout layout = make_layout(window_pos, window_size);
+
+    definitive_ui::IntroTargets intro_targets{};
+    intro_targets.brand_pos = layout.point(48.0f, 36.0f);
+    intro_targets.brand_size = layout.px(54.0f);
+    for (int i = 0; i < 4; ++i) {
+        intro_targets.bar_centers[i] = layout.point(63.0f + i * 32.0f, 121.0f);
+    }
+    intro_targets.ui_scale = layout.scale;
+
+    // The intro owns the screen until the glide.
+    if (startup < definitive_ui::kIntroGlideStart) {
         definitive_ui::draw_intro_presentation(
-            window_pos, window_size, g_launcher_intro_elapsed);
+            window_pos, window_size, startup, intro_targets);
         return;
     }
 
-    Layout layout = make_layout(window_pos, window_size);
-
-    // Startup sequencing is intentionally strict:
-    //   intro -> black UI assembly -> one photograph fade-in.
-    // launcher_background_alpha stays zero until the UI animation is complete,
-    // preventing any intermediate photograph flash/fade cycle.
+    // The photo fades in quickly, then keeps settling: it zooms out from
+    // kPhotoZoom and sharpens from its blurred copy.
+    const float photo_t = std::clamp(
+        (startup - kPhotoStart) /
+            (definitive_ui::kLauncherSequenceEnd - kPhotoStart),
+        0.0f, 1.0f);
+    const float photo_settle = definitive_ui::ease_out_cubic(photo_t);
     definitive_ui::draw_launcher_background(
-        draw, window_pos, window_size, launcher_background_alpha);
+        draw, window_pos, window_size,
+        smoothstep01(photo_t / 0.55f),
+        1.0f + (kPhotoZoom - 1.0f) * (1.0f - photo_settle),
+        1.0f - photo_settle);
 
     definitive_ui::draw_launcher_readability_shade(
         draw,
@@ -843,8 +748,11 @@ void App::panel_definitive_home() {
         definitive_background_color(rgba(1, 3, 6, 206), 0.82f),
         definitive_background_color(rgba(1, 3, 6, 206), 0.82f));
 
-    add_text(draw, layout, 48.0f, 36.0f, 54.0f,
-        rgba(223, 225, 228, 248), "VibeStation");
+    // Until the glide lands, the intro draws the title on its way here.
+    if (startup >= definitive_ui::kIntroGlideEnd) {
+        add_text(draw, layout, 48.0f, 36.0f, 54.0f,
+            rgba(223, 225, 228, 248), "VibeStation");
+    }
 
     constexpr std::array<ImU32, 4> accent_colors = {
         IM_COL32(194, 44, 56, 255),
@@ -860,6 +768,13 @@ void App::panel_definitive_home() {
     };
     const float accent_time = static_cast<float>(ImGui::GetTime());
     for (int i = 0; i < 4; ++i) {
+        // Each bar appears as the intro light flying into it lands.
+        const float bar_alpha =
+            definitive_ui::intro_color_bar_alpha(i, startup);
+        if (bar_alpha <= 0.001f) {
+            continue;
+        }
+        const int bar_vertices = draw->VtxBuffer.Size;
         const float pulse = 0.55f +
             0.45f * std::sin(accent_time * 1.35f + static_cast<float>(i) * 0.78f);
         const ImVec2 p0 = layout.point(50.0f + i * 32.0f, 116.0f);
@@ -870,7 +785,14 @@ void App::panel_definitive_home() {
             ImVec2(p1.x + spread, p1.y + spread),
             accent_glow_colors[static_cast<size_t>(i)]);
         draw->AddRectFilled(p0, p1, accent_colors[static_cast<size_t>(i)]);
+        definitive_ui::offset_draw_vertices(
+            draw, bar_vertices, ImVec2(0.0f, 0.0f), bar_alpha);
     }
+
+    // Version and quote drift in from the right.
+    const float meta_in =
+        definitive_ui::ease_out_cubic((startup - kMetaStart) / 0.6f);
+    const int meta_vertices = draw->VtxBuffer.Size;
     add_text_right(draw, layout, 1235.0f, 34.0f, 11.5f,
         rgba(176, 183, 191, 232), vibestation_version_string());
     const LauncherQuote& launcher_quote =
@@ -882,19 +804,66 @@ void App::panel_definitive_home() {
     const ImVec2 dash0 = layout.point(1208.0f, 103.0f);
     const ImVec2 dash1 = layout.point(1235.0f, 103.0f);
     draw->AddLine(dash0, dash1, rgba(180, 184, 190, 190), layout.px(1.0f));
+    definitive_ui::offset_draw_vertices(
+        draw, meta_vertices,
+        ImVec2(layout.px(14.0f) * (1.0f - meta_in), 0.0f), meta_in);
 
-    const bool start_pressed = menu_button(layout, draw, 0, MenuIcon::Play,
-        "Start Emulation", "Load BIOS and start playing", launcher_ready);
-    const bool load_game_pressed = menu_button(layout, draw, 1, MenuIcon::Folder,
-        "Load Game", "Choose a game from your library", launcher_ready);
-    const bool change_bios_pressed = menu_button(layout, draw, 2, MenuIcon::Chip,
-        "Change BIOS", "Manage BIOS files", launcher_ready);
-    const bool grim_reaper_pressed = menu_button(layout, draw, 3, MenuIcon::Skull,
-        "Grim Reaper", "Corrupt BIOS, RAM, GPU and audio", launcher_ready);
-    const bool settings_pressed = menu_button(layout, draw, 4, MenuIcon::Settings,
-        "Settings", "Configure emulator options", launcher_ready);
-    const bool exit_pressed = menu_button(layout, draw, 5, MenuIcon::Exit,
-        "Exit", "Close VibeStation", launcher_ready);
+    g_intro_highlight =
+        startup < kIntroHighlightStart
+            ? 0.0f
+            : definitive_ui::ease_out_cubic(
+                (startup - kIntroHighlightStart) / kIntroHighlightDuration);
+
+    // Rows slide in from the left one after another, fading as they come.
+    const auto menu_row = [&](int index, MenuIcon icon,
+                              const char* title, const char* subtitle) {
+        const float start = kRowsStart + kRowStagger * static_cast<float>(index);
+        const float q = (startup - start) / kRowDuration;
+        const int row_vertices = draw->VtxBuffer.Size;
+        const bool pressed = menu_button(
+            layout, draw, index, icon, title, subtitle, launcher_ready);
+        if (q < 1.0f) {
+            definitive_ui::offset_draw_vertices(
+                draw, row_vertices,
+                ImVec2(-layout.px(kRowSlide) *
+                        (1.0f - definitive_ui::ease_out_expo(q)),
+                    0.0f),
+                smoothstep01(q / 0.6f));
+        }
+        return pressed;
+    };
+
+    // A game left with the toolbar's Exit waits paused behind the launcher.
+    const bool can_resume =
+        session_suspended_ && system_ != nullptr && system_->bios_loaded();
+    bool start_pressed = can_resume
+        ? menu_row(0, MenuIcon::Play,
+            "Resume Emulation", "Return to the paused game")
+        : menu_row(0, MenuIcon::Play,
+            "Start Emulation", "Load BIOS and start playing");
+    const bool load_game_pressed = menu_row(1, MenuIcon::Folder,
+        "Load Game", "Choose a game from your library");
+    const bool change_bios_pressed = menu_row(2, MenuIcon::Chip,
+        "Change BIOS", "Manage BIOS files");
+    const bool grim_reaper_pressed = menu_row(3, MenuIcon::Skull,
+        "Grim Reaper", "Corrupt BIOS, RAM, GPU and audio");
+    const bool settings_pressed = menu_row(4, MenuIcon::Settings,
+        "Settings", "Configure emulator options");
+    const bool vs2_pressed = menu_row(5, MenuIcon::Orbit,
+        "VibeStation 2", "Switch to the PS2 emulator (experimental)");
+    const bool exit_pressed = menu_row(6, MenuIcon::Exit,
+        "Exit", "Close VibeStation");
+
+    // Enter accepts the startup highlight on Start Emulation while nothing
+    // else has keyboard focus.
+    if (launcher_ready && !g_intro_highlight_dismissed &&
+        g_intro_highlight > 0.5f && !ImGui::IsAnyItemFocused() &&
+        !vs2_warning_open_ &&
+        (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false))) {
+        g_intro_highlight_dismissed = true;
+        start_pressed = true;
+    }
 
     const auto choose_bios = [this]() -> bool {
         std::string path = open_file_dialog(
@@ -915,6 +884,7 @@ void App::panel_definitive_home() {
         bios_path_ = path;
         save_persistent_config();
         has_started_emulation_ = false;
+        session_suspended_ = false;
         set_grim_reaper_mode(false);
         status_message_ = "BIOS loaded: " + system_->bios().get_info();
         return true;
@@ -923,7 +893,12 @@ void App::panel_definitive_home() {
     if (start_pressed && launcher_ready &&
         g_launcher_start_transition == LauncherStartTransition::None) {
         play_ui_open_sound();
-        if (!system_->bios_loaded() && !choose_bios()) {
+        if (can_resume) {
+            g_launcher_start_transition = LauncherStartTransition::Resume;
+            g_launcher_start_transition_elapsed = 0.0f;
+            status_message_ = "Resuming emulation...";
+        }
+        else if (!system_->bios_loaded() && !choose_bios()) {
             // File picker cancelled or BIOS failed to load.
         }
         else {
@@ -985,6 +960,12 @@ void App::panel_definitive_home() {
         play_ui_open_sound();
         open_definitive_settings();
     }
+    if (vs2_pressed && launcher_ready &&
+        !launcher_transitioning && !vs2_warning_open_) {
+        // Experimental: always confirm first (definitive_vs2_switch.cpp).
+        play_ui_open_sound();
+        vs2_warning_open_ = true;
+    }
     if (exit_pressed && launcher_ready &&
         !launcher_transitioning) {
         play_ui_close_sound();
@@ -1012,10 +993,21 @@ void App::panel_definitive_home() {
             g_launcher_start_transition = LauncherStartTransition::None;
             g_launcher_start_transition_elapsed = 0.0f;
 
-            launcher_started_this_frame =
-                requested == LauncherStartTransition::Disc
-                    ? boot_disc_from_ui()
-                    : start_bios_from_ui();
+            if (requested == LauncherStartTransition::Resume) {
+                session_suspended_ = false;
+                has_started_emulation_ = true;
+                gameplay_toolbar_visibility_ = 0.0f;
+                gameplay_toolbar_reveal_hold_ = 0.0f;
+                emu_runner_.set_running(true);
+                status_message_ = "Emulation resumed";
+                launcher_started_this_frame = true;
+            }
+            else {
+                launcher_started_this_frame =
+                    requested == LauncherStartTransition::Disc
+                        ? boot_disc_from_ui()
+                        : start_bios_from_ui();
+            }
 
             // Keep this final launcher frame fully black. The next frame is
             // owned by the emulator screen if startup succeeded.
@@ -1033,41 +1025,49 @@ void App::panel_definitive_home() {
         refresh_game_library();
     }
 
-    constexpr float panel_y = 585.0f;
-    draw_panel(draw, layout, 32.0f, panel_y, 808.0f, 183.0f);
-    draw_panel(draw, layout, 854.0f, panel_y, 394.0f, 183.0f);
+    // The two cards rise into place, the system card just behind the library.
+    const auto panel_in = [startup](int index) {
+        return (startup - kPanelsStart - kPanelStagger * static_cast<float>(index)) /
+            kPanelDuration;
+    };
+    const float library_in = panel_in(0);
+    const float library_alpha = smoothstep01(library_in / 0.7f);
+    const float library_y =
+        585.0f + kPanelRise * (1.0f - definitive_ui::ease_out_cubic(library_in));
+    const int library_vertices = draw->VtxBuffer.Size;
+    draw_panel(draw, layout, 32.0f, library_y, 808.0f, 183.0f);
 
-    draw_folder_badge(draw, layout, 53.0f, panel_y + 17.0f);
-    add_text(draw, layout, 86.0f, panel_y + 20.0f, 16.5f,
+    draw_folder_badge(draw, layout, 53.0f, library_y + 17.0f);
+    add_text(draw, layout, 86.0f, library_y + 20.0f, 16.5f,
         rgba(240, 243, 247, 255), "Game Library");
-    draw->AddLine(layout.point(46.0f, panel_y + 44.0f),
-        layout.point(826.0f, panel_y + 44.0f),
+    draw->AddLine(layout.point(46.0f, library_y + 44.0f),
+        layout.point(826.0f, library_y + 44.0f),
         rgba(105, 116, 128, 165), layout.px(1.0f));
 
     const std::string rom_label = rom_directory_valid_
         ? "ROM Directory: " + rom_directory_
         : "ROM Directory: not set";
-    add_text(draw, layout, 53.0f, panel_y + 52.0f, 12.8f,
+    add_text(draw, layout, 53.0f, library_y + 52.0f, 12.8f,
         rgba(218, 223, 229, 250), rom_label.c_str());
 
     if (!rom_directory_valid_) {
-        add_text(draw, layout, 53.0f, panel_y + 87.0f, 10.2f,
+        add_text(draw, layout, 53.0f, library_y + 87.0f, 10.2f,
             rgba(224, 74, 74, 245), "No ROM directory configured.");
-        add_text(draw, layout, 53.0f, panel_y + 111.0f, 10.0f,
+        add_text(draw, layout, 53.0f, library_y + 111.0f, 10.0f,
             rgba(205, 210, 217, 238),
             "Set a ROM directory to scan and list games here.");
     }
     else if (game_library_.empty()) {
-        add_text(draw, layout, 53.0f, panel_y + 89.0f, 10.0f,
+        add_text(draw, layout, 53.0f, library_y + 89.0f, 10.0f,
             rgba(207, 180, 108, 235), "No playable disc images found.");
     }
     else {
         const std::string count_label =
             std::to_string(game_library_.size()) + " games";
-        add_text_right(draw, layout, 796.0f, panel_y + 52.0f, 12.0f,
+        add_text_right(draw, layout, 796.0f, library_y + 52.0f, 12.0f,
             rgba(213, 220, 228, 248), count_label.c_str());
 
-        ImGui::SetCursorScreenPos(layout.point(53.0f, panel_y + 76.0f));
+        ImGui::SetCursorScreenPos(layout.point(53.0f, library_y + 76.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
         ImGui::PushStyleVar(
             ImGuiStyleVar_ItemSpacing, layout.size(5.0f, 2.0f));
@@ -1085,6 +1085,9 @@ void App::panel_definitive_home() {
             (game_library_.size() > 3
                 ? ImGuiWindowFlags_AlwaysVerticalScrollbar
                 : ImGuiWindowFlags_None);
+        // The list is its own window, so fade it through the style instead.
+        ImGui::PushStyleVar(
+            ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * library_alpha);
         ImGui::BeginChild(
             "##DefinitiveGameLibraryScroll",
             layout.size(755.0f, 59.0f), false, library_flags);
@@ -1123,12 +1126,13 @@ void App::panel_definitive_home() {
         }
 
         ImGui::EndChild();
+        ImGui::PopStyleVar();
         ImGui::PopStyleColor(5);
         ImGui::PopStyleVar(3);
     }
 
     if (small_button(layout, "set_rom_dir", "Set Directory",
-        53.0f, panel_y + 145.0f, 130.0f, 25.0f) &&
+        53.0f, library_y + 145.0f, 130.0f, 25.0f) &&
         launcher_ready) {
         play_ui_open_sound();
         const std::string selected = open_folder_dialog("Select ROM Directory");
@@ -1142,52 +1146,61 @@ void App::panel_definitive_home() {
         }
     }
     if (small_button(layout, "refresh_rom_dir", "Refresh",
-        196.0f, panel_y + 145.0f, 90.0f, 25.0f, rom_directory_valid_) &&
+        196.0f, library_y + 145.0f, 90.0f, 25.0f, rom_directory_valid_) &&
         launcher_ready) {
         game_library_dirty_ = true;
         refresh_game_library();
     }
+    definitive_ui::offset_draw_vertices(
+        draw, library_vertices, ImVec2(0.0f, 0.0f), library_alpha);
 
-    draw_info_badge(draw, layout, 875.0f, panel_y + 17.0f);
-    add_text(draw, layout, 905.0f, panel_y + 19.0f, 16.5f,
+    const float info_in = panel_in(1);
+    const float info_alpha = smoothstep01(info_in / 0.7f);
+    const float info_y =
+        585.0f + kPanelRise * (1.0f - definitive_ui::ease_out_cubic(info_in));
+    const int info_vertices = draw->VtxBuffer.Size;
+    draw_panel(draw, layout, 854.0f, info_y, 394.0f, 183.0f);
+    draw_info_badge(draw, layout, 875.0f, info_y + 17.0f);
+    add_text(draw, layout, 905.0f, info_y + 19.0f, 16.5f,
         rgba(240, 243, 247, 255), "System Info");
-    draw->AddLine(layout.point(868.0f, panel_y + 44.0f),
-        layout.point(1232.0f, panel_y + 44.0f),
+    draw->AddLine(layout.point(868.0f, info_y + 44.0f),
+        layout.point(1232.0f, info_y + 44.0f),
         rgba(105, 116, 128, 165), layout.px(1.0f));
 
     const ImU32 label_color = rgba(216, 222, 229, 250);
     const ImU32 value_color = rgba(244, 247, 250, 255);
-    add_text(draw, layout, 875.0f, panel_y + 58.0f, 12.2f,
+    add_text(draw, layout, 875.0f, info_y + 58.0f, 12.2f,
         label_color, "Emulator:");
-    add_text(draw, layout, 995.0f, panel_y + 58.0f, 12.4f,
+    add_text(draw, layout, 995.0f, info_y + 58.0f, 12.4f,
         value_color, "VibeStation");
-    add_text(draw, layout, 875.0f, panel_y + 77.0f, 12.2f,
+    add_text(draw, layout, 875.0f, info_y + 77.0f, 12.2f,
         label_color, "Version:");
-    add_text(draw, layout, 995.0f, panel_y + 77.0f, 12.4f,
+    add_text(draw, layout, 995.0f, info_y + 77.0f, 12.4f,
         value_color, vibestation_version_string());
-    add_text(draw, layout, 875.0f, panel_y + 96.0f, 12.2f,
+    add_text(draw, layout, 875.0f, info_y + 96.0f, 12.2f,
         label_color, "BIOS:");
-    add_text(draw, layout, 995.0f, panel_y + 96.0f, 12.4f,
+    add_text(draw, layout, 995.0f, info_y + 96.0f, 12.4f,
         value_color, system_->bios_loaded() ? "Loaded" : "Not loaded");
-    add_text(draw, layout, 875.0f, panel_y + 115.0f, 12.2f,
+    add_text(draw, layout, 875.0f, info_y + 115.0f, 12.2f,
         label_color, "ROM Directory:");
-    add_text(draw, layout, 995.0f, panel_y + 115.0f, 12.4f,
+    add_text(draw, layout, 995.0f, info_y + 115.0f, 12.4f,
         value_color, rom_directory_valid_ ? "Set" : "Not set");
-    add_text(draw, layout, 875.0f, panel_y + 134.0f, 12.2f,
+    add_text(draw, layout, 875.0f, info_y + 134.0f, 12.2f,
         label_color, "Games Found:");
     const std::string games_found = std::to_string(game_library_.size());
-    add_text(draw, layout, 995.0f, panel_y + 134.0f, 12.4f,
+    add_text(draw, layout, 995.0f, info_y + 134.0f, 12.4f,
         value_color, games_found.c_str());
+    definitive_ui::offset_draw_vertices(
+        draw, info_vertices, ImVec2(0.0f, 0.0f), info_alpha);
+
+    // The departing icon, gliding title and colour lights go on top.
+    if (!g_startup_complete) {
+        definitive_ui::draw_intro_presentation(
+            window_pos, window_size, startup, intro_targets);
+    }
 
     // Launcher-to-emulator transition. Use the viewport foreground draw list
     // so the fade also covers child windows (notably the scrollable game list).
-    if (launcher_ui_initializing) {
-        draw_launcher_initialization_overlay(
-            window_pos, window_size, g_launcher_ui_intro_elapsed);
-    }
-
-    (void)launcher_background_fading;
-
     if (launcher_fade_alpha > 0.0f || launcher_started_this_frame) {
         const int fade_alpha = glow_alpha(255.0f * launcher_fade_alpha);
         ImDrawList* fade_draw =

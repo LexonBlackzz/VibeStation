@@ -638,6 +638,11 @@ void play_startup_sound() {
     }
 }
 
+void skip_startup_sound() {
+    stop_startup_sound();
+    g_launcher_startup_sound_played = true;
+}
+
 void stop_startup_sound() {
     if (!g_launcher_startup_sound_played ||
         g_ui_sound_device == 0) {

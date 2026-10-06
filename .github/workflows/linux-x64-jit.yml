@@ -25,6 +25,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history: the build number is the commit count
 
       # Restore the most recent compiler cache and save a new one per commit.
       # Unchanged files (all of SDL2, most of the emulator) become cache hits.

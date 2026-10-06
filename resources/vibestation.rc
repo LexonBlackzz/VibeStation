@@ -13,3 +13,18 @@ IDR_VIBESTATION_CURSOR_WAV RCDATA "ui\\definitive\\sounds\\cursor.wav"
 IDR_VIBESTATION_OPEN_WAV RCDATA "ui\\definitive\\sounds\\open.wav"
 IDR_VIBESTATION_CLOSE_WAV RCDATA "ui\\definitive\\sounds\\close.wav"
 IDR_VIBESTATION_LOGO_WAV RCDATA "ui\\definitive\\sounds\\logo.wav"
+
+// VibeStation 2 (experimental/ps2/resources/vs2; forward slashes, because
+// rc reads "\r" in "\resources" as an escape). Named rather than numbered:
+// the PS2 frontend finds each file as its name in capitals with - and . as _
+// (load_asset() in experimental/ps2/ui/vs2/vs2_assets.cpp).
+VS2_BOOT_WAV RCDATA "../experimental/ps2/resources/vs2/vs2-boot.wav"
+VS2_BACKTOMENU_WAV RCDATA "../experimental/ps2/resources/vs2/vs2-backtomenu.wav"
+VS2_HIGHLIGHT_WAV RCDATA "../experimental/ps2/resources/vs2/vs2-highlight.wav"
+VS2_MENUOPEN_WAV RCDATA "../experimental/ps2/resources/vs2/vs2-menuopen.wav"
+VS2_MENUCLOSE_WAV RCDATA "../experimental/ps2/resources/vs2/vs2-menuclose.wav"
+VS2_SELECTED_WAV RCDATA "../experimental/ps2/resources/vs2/vs2-selected.wav"
+VS2_AMBIENTBG_OGG RCDATA "../experimental/ps2/resources/vs2/vs2-ambientbg.ogg"
+VS2_CERTAINSTATIC_WAV RCDATA "../experimental/ps2/resources/vs2/vs2-certainstatic.wav"
+PS_PNG RCDATA "../experimental/ps2/resources/vs2/ps.png"
+PS2_PNG RCDATA "../experimental/ps2/resources/vs2/ps2.png"

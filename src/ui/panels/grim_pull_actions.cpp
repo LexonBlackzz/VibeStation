@@ -237,6 +237,7 @@ bool App::grim_pull_boot(const GrimGenome& genome, u64 pull_number) {
     system_->set_grim_genome(runtime.get());
     s.runtime = std::move(runtime); // the old runtime is no longer referenced
     has_started_emulation_ = false;
+    session_suspended_ = false;
     system_->reset(); // replays the ROM genes and rewinds the interface genes
     apply_memory_card_settings(false);
     has_started_emulation_ = true;

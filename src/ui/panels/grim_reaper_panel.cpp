@@ -463,6 +463,7 @@ void App::panel_grim_reaper() {
                 disable_gpu_reaper_mode();
                 disable_sound_reaper_mode();
                 has_started_emulation_ = false;
+                session_suspended_ = false;
                 status_message_ = "Emulation stopped";
             }
             if (!has_started_emulation_) {
@@ -485,6 +486,7 @@ void App::panel_grim_reaper() {
                 }
                 else {
                     has_started_emulation_ = false;
+                    session_suspended_ = false;
                     system_->reset();
                     apply_memory_card_settings(false);
                     has_started_emulation_ = true;

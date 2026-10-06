@@ -1,0 +1,193 @@
+#pragma once
+
+#include "ui/vs2/vs2_host.h"
+#include "ui/vs2/vs2_boot.h"
+#include "ui/vs2/vs2_edge_light.h"
+#include "ui/vs2/vs2_orbit.h"
+#include "ui/vs2/vs2_shared.h"
+
+#include <array>
+#include <atomic>
+#include <cstdint>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace ps2::ui::vs2 {
+
+// The VibeStation 2 frontend: PS2-styled menu over a black void with orbiting
+// lights, laid out in the same 1280x800 design space as the PS1 definitive UI.
+class Frontend {
+public:
+    explicit Frontend(Host& host);
+    ~Frontend();
+    Frontend(const Frontend&) = delete;
+    Frontend& operator=(const Frontend&) = delete;
+
+    // After the ImGui context exists, before the first frame.
+    void init();
+    // While the GL context is still current.
+    void shutdown();
+
+    // Draws the whole window. Call between ImGui::NewFrame() and Render().
+    void frame();
+
+    // Coming back from the developer view.
+    void on_shown();
+    // Going to the developer view: fades the menu ambience out.
+    void on_hidden();
+    // Replays the boot animation into the menu (each switch to VibeStation 2).
+    void restart_boot();
+    // Fades to black and hands the window back to VibeStation 1.
+    void leave_to_vs1() { if (leave_t0_ < 0.0) leave_t0_ = now_; }
+    // False while a menu is up, so pad keys do not reach a running game.
+    [[nodiscard]] bool wants_game_input() const { return screen_ == Screen::InGame; }
+    // Each new emulator frame, for the light around the picture.
+    void on_game_frame(const std::uint32_t* rgba, int width, int height) {
+        edge_light_.update(rgba, width, height);
+    }
+
+private:
+    enum class Screen { Intro, Home, Browser, Config, Version, Reaper, Exit, Starting, InGame, Handoff };
+
+    struct Game {
+        std::string path;
+        std::string title;
+        std::string serial;
+        std::string kind; // "PS2 DVD", "PS2 CD", "PS1 CD", ...
+    };
+
+    struct Settings {
+        std::string rom_dir;
+        std::string bios_path;
+        bool startup_video = true;
+        bool sounds = true;
+        bool ambience = true;
+    };
+
+    struct Input {
+        bool up = false, down = false, left = false, right = false;
+        bool accept = false, back = false, triangle = false, square = false;
+        float wheel = 0.0f;
+        bool clicked = false;
+        ImVec2 mouse{};
+    };
+
+    // vs2_frontend.cpp
+    void go(Screen next, bool quiet = false);
+    void begin_reveal();
+    // What the first frame of an activation starts: game, boot or menu.
+    void begin_first_screen();
+    void draw_disclaimer(ImDrawList* draw, const Layout& layout, float t);
+    void update_intro(const Input& in);
+    void draw_intro(ImDrawList* draw, const Layout& layout);
+    void draw_in_game(ImDrawList* draw, const ImVec2& pos, const ImVec2& size);
+    void update_in_game();
+    // vs2_toolbar.cpp
+    void draw_toolbar(const ImVec2& image_pos, const ImVec2& image_size, bool ps1);
+    void draw_perf_overlay(ImDrawList* draw, const ImVec2& image_pos, const ImVec2& image_size);
+    void leave_game_to(Screen next);
+    void set_turbo_held(bool held);
+    void restart_session();
+    void start_session();
+    void boot_game(const Game& game);
+    void toast(std::string message);
+    void draw_toast(ImDrawList* draw, const Layout& layout);
+    void draw_hints(ImDrawList* draw, const Layout& layout, float alpha,
+                    std::initializer_list<std::pair<char, const char*>> hints);
+    Input read_input() const;
+    void load_settings();
+    void save_settings() const;
+    void apply_saved_settings();
+
+    // vs2_home.cpp
+    void update_home(const Input& in, const Layout& layout);
+    void draw_home(ImDrawList* draw, const Layout& layout);
+    void activate_home_item();
+
+    // vs2_screens.cpp
+    void update_browser(const Input& in, const Layout& layout);
+    void draw_browser(ImDrawList* draw, const Layout& layout, float alpha);
+    void update_config(const Input& in, const Layout& layout);
+    void draw_config(ImDrawList* draw, const Layout& layout, float alpha);
+    void change_config(int row, int direction);
+    [[nodiscard]] int config_row_count() const;
+    [[nodiscard]] int config_row_id(int visible) const;
+    void draw_version(ImDrawList* draw, const Layout& layout, float alpha);
+    void draw_reaper(ImDrawList* draw, const Layout& layout, float alpha);
+    void update_exit(const Input& in, const Layout& layout);
+    void draw_exit(ImDrawList* draw, const Layout& layout, float alpha);
+    void draw_title(ImDrawList* draw, const Layout& layout, float alpha,
+                    const char* title, const std::string& crumb, ImU32 color);
+    void rescan_games();
+    void stop_scan();
+
+    Host& host_;
+    Orbit orbit_{};
+    BootAnimation boot_{};
+    // Browser disc logos from resources/vs2 (ps.png, ps2.png); 0 when missing.
+    struct Logo {
+        unsigned int texture = 0;
+        int width = 0;
+        int height = 0;
+    };
+    Logo ps1_logo_{};
+    Logo ps2_logo_{};
+    double boot_t0_ = 0.0;
+    Settings settings_{};
+
+    Screen screen_ = Screen::Home;
+    Screen fading_screen_ = Screen::Home; // sub-screen still fading out
+    double now_ = 0.0;
+    float dt_ = 0.0f;
+    double reveal_t0_ = -1.0;
+    double screen_t0_ = 0.0;
+    bool intro_pending_ = false;
+    bool intro_revealed_ = false;
+    bool first_frame_ = true;
+    // Set after the first frame ever: later activations skip the boot.
+    bool shown_before_ = false;
+    // >= 0 while the startup disclaimer is up (its start time).
+    double disclaimer_t0_ = -1.0;
+
+    // Starts hidden: the menu only fades in with the reveal, never at launch.
+    float home_alpha_ = 0.0f;
+    float sub_alpha_ = 0.0f;
+    float game_alpha_ = 0.0f;
+
+    int home_sel_ = 1;
+    float home_sel_anim_ = 1.0f;
+    int config_sel_ = 0;
+    int browser_sel_ = 0;
+    float browser_sel_anim_ = 0.0f;
+    int exit_sel_ = 0;
+
+    std::string toast_{};
+    double toast_t0_ = -10.0;
+    // Glyph of the button hint clicked this frame (0 = none); read next frame.
+    char hint_clicked_ = 0;
+    double leave_t0_ = -1.0; // fading out towards VibeStation 1
+    double game_entered_t0_ = 0.0;
+    // A PS1 disc going to VibeStation 1 (Screen::Handoff): its title.
+    std::string handoff_title_{};
+
+    // In-game chrome.
+    EdgeLight edge_light_{};
+    float toolbar_visibility_ = 0.0f;
+    float toolbar_reveal_hold_ = 0.0f;
+    std::array<float, 10> toolbar_hover_mix_{};
+    std::array<bool, 10> toolbar_was_hovered_{};
+    bool turbo_held_ = false;
+    bool show_perf_ = false;
+    // What Restart boots again: a disc, or the BIOS when empty.
+    std::string last_boot_disc_{};
+
+    std::mutex games_mutex_{};
+    std::vector<Game> games_{};
+    std::thread scan_thread_{};
+    std::atomic<bool> scanning_{false};
+    std::atomic<bool> stop_scan_{false};
+};
+
+} // namespace ps2::ui::vs2

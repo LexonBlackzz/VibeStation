@@ -1,5 +1,6 @@
 #include "app.h"
 #include "core/grim_genome.h"
+#include "ui/host_window.h"
 #include "platform/disc_path_utils.h"
 #include "platform/memory_card_utils.h"
 #include "ui/input_bindings.h"
@@ -137,18 +138,21 @@ void App::set_input_recorder_config(const InputRecorder::Config& config) {
     input_recorder_.set_config(config);
 }
 
-bool App::init() {
-    printf("[App::init] Initializing SDL...\n");
-    fflush(stdout);
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO) !=
-        0) {
-        LOG_ERROR("SDL_Init failed: %s", SDL_GetError());
-        printf("[App::init] SDL_Init FAILED: %s\n", SDL_GetError());
+bool App::init(const HostWindow* host) {
+    hosted_ = host != nullptr;
+    if (!hosted_) {
+        printf("[App::init] Initializing SDL...\n");
         fflush(stdout);
-        return false;
+        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO) !=
+            0) {
+            LOG_ERROR("SDL_Init failed: %s", SDL_GetError());
+            printf("[App::init] SDL_Init FAILED: %s\n", SDL_GetError());
+            fflush(stdout);
+            return false;
+        }
+        printf("[App::init] SDL OK\n");
+        fflush(stdout);
     }
-    printf("[App::init] SDL OK\n");
-    fflush(stdout);
 
     if (!input_) {
         input_ = std::make_unique<InputManager>();
@@ -159,6 +163,31 @@ bool App::init() {
     }
     sync_discord_presence_config();
 
+    if (hosted_) {
+        // Shared window: VibeStation 2 may run in it too.
+        window_ = host->window;
+        gl_context_ = host->gl_context;
+        imgui_glsl_version_ = host->glsl;
+        use_imgui_opengl2_backend_ = host->opengl2;
+        SDL_GL_MakeCurrent(window_, gl_context_);
+        SDL_GL_SetSwapInterval(config_vsync_ ? 1 : 0);
+        SDL_SetWindowTitle(window_, "VibeStation - PS1 Emulator");
+    }
+    else if (!create_own_window()) {
+        return false;
+    }
+
+    // Init Dear ImGui. Each app owns its context; make it current
+    // explicitly, as ImGui only does so for the first context created.
+    printf("[App::init] Initializing ImGui...\n");
+    fflush(stdout);
+    IMGUI_CHECKVERSION();
+    imgui_context_ = ImGui::CreateContext();
+    ImGui::SetCurrentContext(imgui_context_);
+    return init_imgui();
+}
+
+bool App::create_own_window() {
     struct GlContextAttempt {
         int major;
         int minor;
@@ -230,12 +259,10 @@ bool App::init() {
         fflush(stdout);
         return false;
     }
+    return true;
+}
 
-    // Init Dear ImGui
-    printf("[App::init] Initializing ImGui...\n");
-    fflush(stdout);
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
+bool App::init_imgui() {
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = "imgui.ini";
 
@@ -449,8 +476,16 @@ void App::apply_speed_override() {
 }
 
 void App::run() {
-    if (!init_runtime()) {
+    if (!begin_run()) {
         return;
+    }
+    while (frame()) {
+    }
+}
+
+bool App::begin_run() {
+    if (!init_runtime()) {
+        return false;
     }
 
     // Thread roles:
@@ -460,12 +495,21 @@ void App::run() {
     //   host audio playback    = SDL's dedicated audio callback thread
     SDL_SetThreadPriority(SDL_THREAD_PRIORITY_NORMAL);
 
-    bool quit = false;
     last_fps_time_ = SDL_GetTicks();
-    const u64 perf_freq = SDL_GetPerformanceFrequency();
-    const double target_frame_sec = 1.0 / 60.0;
+    perf_freq_ = SDL_GetPerformanceFrequency();
+    target_frame_sec_ = 1.0 / 60.0;
+    return true;
+}
 
-    while (!quit) {
+bool App::frame() {
+    ImGui::SetCurrentContext(imgui_context_);
+    if (!pending_vs2_disc_.empty()) {
+        boot_pending_vs2_disc();
+    }
+    bool quit = false;
+    const u64 perf_freq = perf_freq_;
+    const double target_frame_sec = target_frame_sec_;
+    {
         const u64 loop_start_counter = SDL_GetPerformanceCounter();
         process_events(quit);
         update();
@@ -592,6 +636,7 @@ void App::run() {
         ImGui::NewFrame();
 
         render_ui();
+        draw_vs2_switch_overlay();
 
         // Render
         ImGui::Render();
@@ -666,6 +711,7 @@ void App::run() {
             }
         }
     }
+    return !quit;
 }
 
 void App::process_events(bool& quit) {
@@ -774,6 +820,7 @@ void App::process_events(bool& quit) {
                         bios_path_ = path;
                         save_persistent_config();
                         has_started_emulation_ = false;
+                        session_suspended_ = false;
                         set_grim_reaper_mode(false);
                         status_message_ = "BIOS loaded: " + system_->bios().get_info();
                     }
@@ -847,6 +894,7 @@ void App::process_events(bool& quit) {
                     disable_gpu_reaper_mode();
                     disable_sound_reaper_mode();
                     has_started_emulation_ = false;
+                    session_suspended_ = false;
                     status_message_ = "Emulation stopped";
                 }
             }
@@ -1081,7 +1129,10 @@ void App::render_ui() {
             if (!gameplay_exit_transition_switched_) {
                 gameplay_exit_transition_switched_ = true;
                 has_started_emulation_ = false;
-                status_message_ = "Emulation stopped";
+                // Exit keeps the paused session for Resume Emulation; Stop ends it.
+                session_suspended_ = !gameplay_exit_stops_;
+                status_message_ = gameplay_exit_stops_ ? "Emulation stopped"
+                                                       : "Emulation paused";
             }
 
             gameplay_exit_alpha =
@@ -1219,6 +1270,7 @@ void App::menu_bar() {
                         bios_path_ = path;
                         save_persistent_config();
                         has_started_emulation_ = false;
+                        session_suspended_ = false;
                         set_grim_reaper_mode(false);
                         status_message_ = "BIOS loaded: " + system_->bios().get_info();
                     }
@@ -1303,6 +1355,7 @@ void App::menu_bar() {
                 disable_gpu_reaper_mode();
                 disable_sound_reaper_mode();
                 has_started_emulation_ = false;
+                session_suspended_ = false;
                 status_message_ = "Emulation stopped";
             }
             if (ImGui::MenuItem("Take Snapshot", "F8", false,
@@ -1554,6 +1607,8 @@ bool App::load_disc_from_ui(const std::string& bin_path,
 
     game_bin_path_ = bin_path;
     game_cue_path_ = cue_path;
+    // A new pick replaces a game paused behind the launcher: Start boots it.
+    session_suspended_ = false;
     apply_memory_card_settings(false);
     status_message_ = "Disc selected: " + disc_label + " (Emulation > Boot Disc)";
     return true;
@@ -2109,6 +2164,7 @@ void App::try_autoload_bios_from_config() {
 
     if (system_->load_bios(bios_path_)) {
         has_started_emulation_ = false;
+        session_suspended_ = false;
         status_message_ = "Auto-loaded BIOS: " + system_->bios().get_info();
     }
     else {
@@ -2117,6 +2173,9 @@ void App::try_autoload_bios_from_config() {
 }
 void App::shutdown() {
     save_persistent_config();
+    if (imgui_context_ != nullptr) {
+        ImGui::SetCurrentContext(imgui_context_);
+    }
     if (ImGui::GetCurrentContext() != nullptr) {
         ImGuiIO& io = ImGui::GetIO();
         if (io.IniFilename != nullptr && io.IniFilename[0] != '\0') {
@@ -2155,14 +2214,20 @@ void App::shutdown() {
         ImGui_ImplOpenGL3_Shutdown();
     }
     ImGui_ImplSDL2_Shutdown();
-    ImGui::DestroyContext();
+    ImGui::DestroyContext(imgui_context_);
+    imgui_context_ = nullptr;
 
-    SDL_GL_DeleteContext(gl_context_);
-    SDL_DestroyWindow(window_);
+    if (!hosted_) {
+        SDL_GL_DeleteContext(gl_context_);
+        SDL_DestroyWindow(window_);
+    }
     if (g_log_file) {
         log_flush_repeats();
         std::fclose(g_log_file);
         g_log_file = nullptr;
     }
-    SDL_Quit();
+    // A host owns the window, the GL context and SDL itself.
+    if (!hosted_) {
+        SDL_Quit();
+    }
 }
