@@ -1,5 +1,6 @@
 #include "app.h"
 #include "core/grim_genome.h"
+#include "ui/definitive/definitive_shared.h"
 #include "ui/host_window.h"
 #include "platform/disc_path_utils.h"
 #include "platform/memory_card_utils.h"
@@ -1217,6 +1218,8 @@ void App::render_ui() {
     ImGui::PopStyleVar(3);
 
     if (has_started_emulation_) {
+        // The launcher TV's ambience does not follow the player into a game.
+        definitive_ui::stop_tv_glitch_sound(true);
         panel_emulator_screen();
     }
     else {

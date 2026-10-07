@@ -10,5 +10,7 @@ inline constexpr int UiCursorWav = 103;
 inline constexpr int UiOpenWav = 104;
 inline constexpr int UiCloseWav = 105;
 inline constexpr int UiLogoWav = 106;
+inline constexpr int TvGlitchOgg = 107;
+inline constexpr int TvFearedOgg = 108;
 
 } // namespace vibestation::resource_ids

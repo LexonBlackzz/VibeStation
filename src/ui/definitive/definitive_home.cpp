@@ -624,6 +624,7 @@ void App::skip_definitive_startup() {
 
 void App::release_definitive_ui_assets() {
     definitive_ui::release_audio_assets();
+    definitive_ui::stop_tv_glitch_sound(false);
     g_menu_was_engaged.fill(false);
 
     definitive_ui::release_intro_assets();
@@ -751,11 +752,20 @@ void App::panel_definitive_home() {
             (definitive_ui::kLauncherSequenceEnd - kPhotoStart),
         0.0f, 1.0f);
     const float photo_settle = definitive_ui::ease_out_cubic(photo_t);
+    const float photo_opacity = smoothstep01(photo_t / 0.55f);
+    const float photo_zoom = 1.0f + (kPhotoZoom - 1.0f) * (1.0f - photo_settle);
     definitive_ui::draw_launcher_background(
         draw, window_pos, window_size,
-        smoothstep01(photo_t / 0.55f),
-        1.0f + (kPhotoZoom - 1.0f) * (1.0f - photo_settle),
+        photo_opacity,
+        photo_zoom,
         1.0f - photo_settle);
+    // The TV in the photo shows a small animated logo (clickable once the
+    // launcher is up and no settings page covers it).
+    definitive_ui::draw_launcher_tv(
+        draw, window_pos, window_size, photo_opacity, photo_zoom,
+        static_cast<float>(ImGui::GetTime()),
+        launcher_ready &&
+            definitive_settings_transition_ == DefinitiveSettingsTransition::Closed);
 
     definitive_ui::draw_launcher_readability_shade(
         draw,
