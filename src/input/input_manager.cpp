@@ -22,12 +22,14 @@ void InputManager::set_default_bindings() {
   key_bindings_[SDL_SCANCODE_W] = PsxButton::R1;
   key_bindings_[SDL_SCANCODE_E] = PsxButton::L2;
   key_bindings_[SDL_SCANCODE_R] = PsxButton::R2;
-  // Start/Select -> Enter/Backspace
+  // Start -> Enter; Select is left unbound (Backspace is fast forward)
   key_bindings_[SDL_SCANCODE_RETURN] = PsxButton::Start;
-  key_bindings_[SDL_SCANCODE_BACKSPACE] = PsxButton::Select;
 }
 
 void InputManager::set_key_binding(SDL_Scancode key, PsxButton button) {
+  if (key == kTurboKey) {
+    return;
+  }
   key_bindings_.erase(key);
   // Remove any existing binding for this button
   for (auto it = key_bindings_.begin(); it != key_bindings_.end();) {

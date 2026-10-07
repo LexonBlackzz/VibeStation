@@ -748,6 +748,9 @@ void App::process_events(bool& quit) {
             if (scancode == SDL_SCANCODE_ESCAPE) {
                 status_message_ = "Keyboard rebinding canceled";
             }
+            else if (scancode == InputManager::kTurboKey) {
+                status_message_ = "Backspace is reserved for fast forward";
+            }
             else {
                 input_->set_key_binding(scancode, kKeyboardBindEntries[bind_index].button);
                 save_persistent_config();

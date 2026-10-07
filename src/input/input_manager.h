@@ -27,7 +27,10 @@ public:
   // Get the controller state
   const Controller &controller() const { return controller_; }
 
-  // Binding management
+  // Binding management. Backspace is the fast-forward hotkey and never
+  // presses a pad button (holding it to fast forward would otherwise skip
+  // FMVs that end on Select).
+  static constexpr SDL_Scancode kTurboKey = SDL_SCANCODE_BACKSPACE;
   void set_key_binding(SDL_Scancode key, PsxButton button);
   void clear_key_binding(PsxButton button);
   SDL_Scancode key_for_button(PsxButton button) const;
