@@ -18,6 +18,7 @@ struct GrimSampleContext;
 //   Visual    GP0 filters (runtime); the ROM visual genes of Phase 6 join later
 //   Code      structural MIPS mutations of BIOS code (ROM, needs the boot map)
 //   Hardware  Faulty Hardware Simulator: failing RAM, VRAM and sound RAM (runtime)
+//   FMV       full-motion video corrupted inside the MDEC as it decodes (runtime)
 // How a gene works (ROM patch, interface filter, hardware fault) is its tag.
 
 enum GrimFamily : u32 {
@@ -27,7 +28,9 @@ enum GrimFamily : u32 {
   // 8 was the Interface family before families meant domains; old library entries
   // may still carry it, and it generates nothing.
   kGrimFamilyHardware = 16,
-  kGrimFamilyAll = kGrimFamilyAudio | kGrimFamilyVisual | kGrimFamilyCode | kGrimFamilyHardware,
+  kGrimFamilyFmv = 32,
+  kGrimFamilyAll = kGrimFamilyAudio | kGrimFamilyVisual | kGrimFamilyCode | kGrimFamilyHardware |
+                   kGrimFamilyFmv,
 };
 
 // The family a gene belongs to (also its colour in the genome list).
@@ -99,7 +102,7 @@ std::string grim_machine_id(const GrimGenome &genome);
 
 // One readable line per gene for the panel's genome list.
 struct GrimGeneLine {
-  u32 domain = kGrimFamilyVisual; // grim_gene_family(): Audio blue, Visual gold, Code red, Hardware purple
+  u32 domain = kGrimFamilyVisual; // grim_gene_family(): Audio blue, Visual gold, Code red, Hardware purple, FMV green
   std::string tag = "IFACE";          // ROM | IFACE | HW
   std::string title;
   std::string detail;

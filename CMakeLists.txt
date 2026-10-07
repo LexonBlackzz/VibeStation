@@ -191,6 +191,7 @@ set(VIBESTATION_SOURCES
     src/core/grim_share.cpp
     src/core/grim_classic.cpp
     src/core/grim_disc.cpp
+    src/core/grim_fmv.cpp
 )
 
 set(VIBESTATION_VERSION_STRING "v0.6.0")

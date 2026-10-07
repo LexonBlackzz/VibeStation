@@ -1,6 +1,7 @@
 #pragma once
 #include "bios.h"
 #include "grim_classic.h"
+#include "grim_fmv.h"
 #include "cdrom.h"
 #include "cpu.h"
 #include "dma.h"
@@ -16,6 +17,7 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <mutex>
 #include <random>
 #include <string>
 #include <vector>
@@ -448,6 +450,13 @@ public:
   // Phase 3 discovery hooks (CPU telemetry loop + DMA); nullptr = off.
   void set_grim_boot_mapper(GrimBootMapper *mapper);
   GrimGenomeRuntime *grim_genome() const { return grim_; }
+  // FMV Reaper: corrupts movies inside the MDEC. Safe from any thread; takes effect
+  // at the next frame. Hits = macroblocks corrupted since it was last switched on.
+  void set_fmv_reaper_config(const GrimFmvReaperConfig &config);
+  u64 fmv_reaper_hits() const { return fmv_.classic_hits.load(std::memory_order_relaxed); }
+  // The CD-ROM hands every decoded XA sector here (interleaved stereo); while a movie
+  // is decoding, FMV corruption with the audio target damages it in place.
+  void grim_fmv_xa_audio(std::vector<s16> &samples);
   // Non-empty when the genome's ROM genes could not be applied (wrong BIOS or
   // a modified image); nothing was patched in that case.
   const std::string &grim_rom_error() const { return grim_rom_error_; }
@@ -935,6 +944,27 @@ private:
   u64 sound_reaper_prev_seed_ = 0;
   InputRecorder* input_recorder_ = nullptr;
   GrimGenomeRuntime *grim_ = nullptr;
+  // What the MDEC calls while an FMV corruption is on: the FMV Reaper first, then
+  // the genome's mdec_fmv genes.
+  struct FmvDispatch final : GrimFmvHook {
+    GrimGenomeRuntime *genome = nullptr;
+    bool classic_on = false;
+    GrimFmvKnobs classic;
+    GrimRng classic_rng;
+    GrimFmvMacroblock classic_mb;
+    std::atomic<u64> classic_hits{0};
+    GrimFmvAudioMemory classic_audio;
+    u32 frames_since_macroblock = kGrimFmvAudioIdleFrames; // movie playing while below the limit
+    void fmv_begin_macroblock() override;
+    u16 fmv_coefficient(u16 halfword) override;
+    void fmv_quant_table(u8 *table, size_t n) override;
+    void fmv_blocks(int *blocks, size_t count) override;
+    u32 fmv_output_word(u32 word) override;
+  } fmv_;
+  std::mutex fmv_config_mutex_;
+  GrimFmvReaperConfig fmv_config_;      // last set (under the mutex)
+  GrimFmvReaperConfig fmv_applied_;     // what the core runs with
+  void apply_fmv_reaper_for_frame();
   std::string grim_rom_error_;
   void grim_apply_rom_genes();
   void grim_write_spu16(u32 offset, u16 value);

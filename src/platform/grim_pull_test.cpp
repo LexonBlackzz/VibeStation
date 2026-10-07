@@ -1103,6 +1103,26 @@ void hardware_tests(const GrimPullContext &ctx) {
     }
     check(only_hw && lines_ok, "pull_hardware_family_makes_hardware_genes");
   }
+  // The FMV family makes only mdec_fmv genes, and switching it off makes none.
+  {
+    GrimPullSettings s;
+    s.families = kGrimFamilyFmv;
+    bool only_fmv = true, lines_ok = true, none_when_off = true;
+    for (u64 seed = 1; seed <= 40; ++seed) {
+      const GrimGenome g = grim_pull_generate(seed, s, ctx, nullptr);
+      only_fmv = only_fmv && !g.genes.empty();
+      for (const GrimGene &gene : g.genes) only_fmv = only_fmv && gene.type == GrimGeneType::MdecFmv;
+      for (const GrimGeneLine &l : grim_pull_describe(g, ctx)) {
+        lines_ok = lines_ok && l.domain == kGrimFamilyFmv && !l.title.empty() && !l.detail.empty();
+      }
+      GrimPullSettings off;
+      off.families = kGrimFamilyAll & ~kGrimFamilyFmv;
+      for (const GrimGene &gene : grim_pull_generate(seed, off, ctx, nullptr).genes) {
+        none_when_off = none_when_off && gene.type != GrimGeneType::MdecFmv;
+      }
+    }
+    check(only_fmv && lines_ok && none_when_off, "pull_fmv_family_makes_fmv_genes");
+  }
 }
 
 // A corrupted GPU list that points back at itself used to replay a million packets inside

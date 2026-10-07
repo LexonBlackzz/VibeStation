@@ -2496,6 +2496,8 @@ static int run_spu_audio_test(const std::string &bios_path, int frames,
     }
     return 1;
   }
+  // `--genome file.json --spu-audio-test ...`: hear a Grim Reaper genome headless.
+  sys->set_grim_genome(grim_gui_genome());
 
   if (!cue_path.empty()) {
     if (!sys->load_game(bin_path, cue_path)) {

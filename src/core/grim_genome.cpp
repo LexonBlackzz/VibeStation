@@ -1,5 +1,6 @@
 #include "grim_genome.h"
 #include "bios.h"
+#include "grim_fmv.h"
 #include "grim_rom.h"
 #include "grim_sample.h"
 #include <algorithm>
@@ -17,7 +18,7 @@ constexpr const char *kTypeNames[] = {
     "spu_pitch",  "spu_adsr",   "spu_volume",   "spu_address",  "spu_keyon",
     "spu_noise",  "spu_pmon",   "spu_reverb",   "gpu_vertex",   "gpu_color",
     "gpu_flags",  "gpu_texparam", "gpu_state",  "gpu_fill",  "rom_code", "spu_sample",
-    "hw_ram",     "hw_vram",    "hw_spuram"};
+    "hw_ram",     "hw_vram",    "hw_spuram", "mdec_fmv"};
 static_assert(sizeof(kTypeNames) / sizeof(kTypeNames[0]) ==
                   static_cast<size_t>(GrimGeneType::Count),
               "type name table out of sync");
@@ -103,6 +104,9 @@ const std::vector<GrimParamSpec> kSchemas[] = {
     // hw_spuram: mode 0 stuck high, 1 stuck low, 2 flip, 3 burst, 4 bad column.
     {{"mode", 0, 4, 0}, {"cells", 1, 4096, 8}, {"lo_kb", 0, 511, 16}, {"span_kb", 1, 512, 128},
      {"bits", 1, 8, 1}, {"rate", 0, 1000, 50}, {"arg", 1, 65535, 64}, {"load", 0, 1000, 0}},
+    // mdec_fmv: rate = permille of macroblocks hit, strength = how hard (0..1024).
+    //           target bits: 1 coefficients, 2 quant tables, 4 blocks, 8 pixels.
+    {{"rate", 0, 1000, 150}, {"strength", 0, 1024, 256}},
 };
 static_assert(sizeof(kSchemas) / sizeof(kSchemas[0]) ==
                   static_cast<size_t>(GrimGeneType::Count),
@@ -396,6 +400,8 @@ u32 grim_gene_default_target(GrimGeneType t) {
     return 0x3Fu;
   case GrimGeneType::GpuFill:
     return 1u;
+  case GrimGeneType::MdecFmv:
+    return kGrimFmvAll;
   default:
     return 7u;
   }
@@ -699,6 +705,7 @@ bool parse_gene(const json &j, size_t index, GrimGene &g, std::string &err) {
   const u32 allowed = is_spu_type(g.type) ? 0x1FFFFFFu
                       : g.type == GrimGeneType::GpuState ? 0x3Fu
                       : g.type == GrimGeneType::GpuFill  ? 1u
+                      : g.type == GrimGeneType::MdecFmv  ? static_cast<u32>(kGrimFmvAll)
                                                           : 7u;
   if ((g.target & ~allowed) != 0u || g.target == 0u) {
     return fail(err, ctx + ": target must be a non-zero subset of mask " +
@@ -901,6 +908,9 @@ GrimGenome grim_random_genome(u64 seed, const GrimRandomParams &rp) {
                              {GrimGeneType::GpuState, 1},
                              {GrimGeneType::GpuFill, 1}});
   }
+  if (rp.fmv) {
+    pool.push_back({GrimGeneType::MdecFmv, 1});
+  }
   if (pool.empty()) {
     if (rp.rom != nullptr && rp.rom_genes_max > 0) {
       grim_add_random_rom_genes(genome, seed, rp); // ROM-only genome
@@ -1008,6 +1018,10 @@ GrimGenomeRuntime::GrimGenomeRuntime(GrimGenome genome) : genome_(std::move(geno
       hw_genes_.push_back(i); // applied to memory at frame/scanline boundaries
       continue;
     }
+    if (genome_.genes[i].type == GrimGeneType::MdecFmv) {
+      fmv_genes_.push_back(i); // applied inside the MDEC
+      continue;
+    }
     (is_spu_type(genome_.genes[i].type) ? spu_genes_ : gpu_genes_).push_back(i);
   }
   reset();
@@ -1066,7 +1080,81 @@ void GrimGenomeRuntime::reset() {
   }
   delayed_.clear();
   shadow_.fill(0);
+  fmv_state_.assign(fmv_genes_.size(), FmvState{});
   build_hw_cells();
+}
+
+// ---- MDEC ----------------------------------------------------------------------------------
+
+void GrimGenomeRuntime::fmv_begin_macroblock() {
+  for (size_t k = 0; k < fmv_genes_.size(); ++k) {
+    const size_t gi = fmv_genes_[k];
+    const GrimGene &g = genome_.genes[gi];
+    FmvState &s = fmv_state_[k];
+    // The trigger scales both settings: a rot gene's movies decay as it ramps up.
+    const u32 m = grim_trigger_magnitude(g.trigger, frame_, rng_[gi].next());
+    s.knobs.targets = g.target;
+    s.knobs.rate = static_cast<u32>(scale_q10(g.params[0], m));
+    s.knobs.strength = static_cast<u32>(scale_q10(g.params[1], m));
+    grim_fmv_begin(s.knobs, rng_[gi], s.mb);
+    if (s.mb.hit) {
+      ++hits_[gi];
+    }
+  }
+}
+
+u16 GrimGenomeRuntime::fmv_coefficient(u16 halfword) {
+  for (FmvState &s : fmv_state_) {
+    halfword = grim_fmv_coefficient(s.knobs, s.mb, halfword);
+  }
+  return halfword;
+}
+
+void GrimGenomeRuntime::fmv_quant_table(u8 *table, size_t n) {
+  for (size_t k = 0; k < fmv_genes_.size(); ++k) {
+    const size_t gi = fmv_genes_[k];
+    const GrimGene &g = genome_.genes[gi];
+    const u32 m = grim_trigger_magnitude(g.trigger, frame_, rng_[gi].next());
+    GrimFmvKnobs knobs;
+    knobs.targets = g.target;
+    knobs.strength = static_cast<u32>(scale_q10(g.params[1], m));
+    if (grim_fmv_quant(knobs, rng_[gi], table, n) > 0u) {
+      ++hits_[gi];
+    }
+  }
+}
+
+void GrimGenomeRuntime::fmv_blocks(int *blocks, size_t count) {
+  for (FmvState &s : fmv_state_) {
+    grim_fmv_blocks(s.knobs, s.mb, blocks, count);
+  }
+}
+
+u32 GrimGenomeRuntime::fmv_output_word(u32 word) {
+  for (FmvState &s : fmv_state_) {
+    word = grim_fmv_output(s.knobs, s.mb, word);
+  }
+  return word;
+}
+
+void GrimGenomeRuntime::fmv_audio(s16 *lr, size_t frames) {
+  for (size_t k = 0; k < fmv_genes_.size(); ++k) {
+    const size_t gi = fmv_genes_[k];
+    const GrimGene &g = genome_.genes[gi];
+    if ((g.target & kGrimFmvAudio) == 0u) {
+      continue; // no draws: the gene's stream stays what it was without audio
+    }
+    const u32 m = grim_trigger_magnitude(g.trigger, frame_, rng_[gi].next());
+    GrimFmvKnobs knobs;
+    knobs.targets = g.target;
+    knobs.rate = static_cast<u32>(scale_q10(g.params[0], m));
+    knobs.strength = static_cast<u32>(scale_q10(g.params[1], m));
+    GrimFmvAudioMemory memory{std::move(fmv_state_[k].audio_last)};
+    if (grim_fmv_audio(knobs, rng_[gi], lr, frames, memory)) {
+      ++hits_[gi];
+    }
+    fmv_state_[k].audio_last = std::move(memory.last);
+  }
 }
 
 void GrimGenomeRuntime::queue_delayed(u64 due, u32 offset, u16 value) {

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <iterator>
 
 namespace {
 using namespace definitive_ui;
@@ -21,6 +22,7 @@ struct Palette {
     ImU32 visual = IM_COL32(211, 169, 63, 255);
     ImU32 code = IM_COL32(224, 83, 94, 255);
     ImU32 hardware = IM_COL32(160, 123, 224, 255);
+    ImU32 fmv = IM_COL32(96, 196, 112, 255);
     ImU32 alive = IM_COL32(63, 179, 166, 255);
     ImU32 working = IM_COL32(211, 169, 63, 255);
     ImU32 dead = IM_COL32(224, 83, 94, 255);
@@ -48,6 +50,7 @@ ImU32 family_color(const Palette& p, u32 family) {
     case kGrimFamilyAudio: return p.audio;
     case kGrimFamilyVisual: return p.visual;
     case kGrimFamilyCode: return p.code;
+    case kGrimFamilyFmv: return p.fmv;
     default: return p.hardware;
     }
 }
@@ -257,7 +260,7 @@ void App::draw_grim_pull_tab() {
             fams |= grim_gene_family(g.type);
         }
         float x = dp.x + 4.0f;
-        for (u32 f : {kGrimFamilyAudio, kGrimFamilyVisual, kGrimFamilyCode, kGrimFamilyHardware}) {
+        for (u32 f : {kGrimFamilyAudio, kGrimFamilyVisual, kGrimFamilyCode, kGrimFamilyHardware, kGrimFamilyFmv}) {
             if (fams & f) {
                 dot(draw, ImVec2(x, dp.y + ImGui::GetTextLineHeight() * 0.5f), family_color(p, f));
                 x += 12.0f;
@@ -425,11 +428,11 @@ void App::draw_grim_pull_tab() {
     ImGui::Spacing();
     {
         u32 fam_on = 0;
-        for (u32 f : {kGrimFamilyAudio, kGrimFamilyVisual, kGrimFamilyCode, kGrimFamilyHardware}) {
+        for (u32 f : {kGrimFamilyAudio, kGrimFamilyVisual, kGrimFamilyCode, kGrimFamilyHardware, kGrimFamilyFmv}) {
             fam_on += (s.settings.families & f & available) != 0 ? 1u : 0u;
         }
         char summary[96];
-        std::snprintf(summary, sizeof(summary), "%s \xC2\xB7 %u of 4 \xC2\xB7 Mercy %s",
+        std::snprintf(summary, sizeof(summary), "%s \xC2\xB7 %u of 5 \xC2\xB7 Mercy %s",
                       grim_pull_readout(s.settings.intensity).c_str(), fam_on, s.mercy ? "on" : "off");
         const ImVec2 hp = ImGui::GetCursorScreenPos();
         const float hh = ImGui::GetTextLineHeight() + 10.0f;
@@ -484,7 +487,7 @@ void App::draw_grim_pull_tab() {
         wrapped_text(p.muted, risk_text(plan.risk_label));
 
         ImGui::Spacing();
-        const float w = (full - 3.0f * gap) / 4.0f;
+        const float w = (full - 4.0f * gap) / 5.0f;
         const struct {
             const char* label;
             u32 family;
@@ -497,8 +500,10 @@ void App::draw_grim_pull_tab() {
                 : "Needs the BIOS map; it is made once per BIOS (see the status line)."},
             {"Hardware", kGrimFamilyHardware,
              "Faulty hardware simulator: failing RAM, VRAM and sound RAM. Kernel memory is almost never hit."},
+            {"FMV", kGrimFamilyFmv,
+             "Full-motion video, corrupted as the MDEC decodes it. Movies break, they never stall."},
         };
-        for (size_t i = 0; i < 4; ++i) {
+        for (size_t i = 0; i < std::size(rows); ++i) {
             if (i > 0) {
                 ImGui::SameLine(0.0f, gap);
             }

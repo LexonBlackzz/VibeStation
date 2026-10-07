@@ -438,6 +438,8 @@ void App::stop_all_corruption() {
     disable_sound_reaper_mode();
     disc_reaper_enabled_ = false;
     sync_disc_reaper_config();
+    fmv_reaper_.enabled = false;
+    sync_fmv_reaper_config();
     grim_auto_armed_ = false;
     grim_pull_release();
 }
