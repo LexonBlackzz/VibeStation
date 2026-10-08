@@ -2729,10 +2729,12 @@ void Cpu::flush_cpu_backend() {
 
 bool Cpu::debug_jit_code_ranges(uintptr_t &dispatcher_begin,
                                 uintptr_t &translations_begin,
-                                uintptr_t &end) const {
+                                uintptr_t &end,
+                                uintptr_t *stubs_begin) const {
   return recompiler_backend_ &&
          recompiler_backend_->debug_code_ranges(dispatcher_begin,
-                                                translations_begin, end);
+                                                translations_begin, end,
+                                                stubs_begin);
 }
 
 CpuBackendStats Cpu::cpu_backend_stats() const {

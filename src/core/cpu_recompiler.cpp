@@ -9,8 +9,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <cstdio>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -650,6 +654,17 @@ u32 v4_hot_mmio_read16(System *sys, u32 phys, u32 resident_cycles) {
                         : 0x10000u;
 }
 
+// 16-bit PAD/SIO register read that lets a V5 block keep running: the full
+// bus transaction (SIO synced to the load's cycle), plus bit 17 when the
+// access asked the scheduler for a boundary, which the block then takes at
+// the next instruction boundary.
+u32 v5_pad_read16(System *sys, u32 phys, u32 resident_cycles) {
+  sys->jit_begin_bus_access(phys, resident_cycles);
+  const u32 value = static_cast<u32>(sys->read16(phys));
+  sys->jit_end_bus_access();
+  return value | (sys->cpu_timing_boundary_requested() ? 0x20000u : 0u);
+}
+
 u32 v4_bus_read8(System *sys, u32 phys, u32 resident_cycles) {
   if (sys == nullptr) {
     return 0u;
@@ -1064,6 +1079,30 @@ void emit_v4_pgxp_word(Xbyak::CodeGenerator &code, size_t fn, u32 rt,
 
 constexpr u32 kV4ScratchpadPhys = 0x1F800000u;
 
+// Constructing an Xbyak::CodeGenerator allocates its label bookkeeping, which
+// dominated block compile time. Every fragment instead reuses one generator
+// that is pointed at the fragment's arena reservation and reset.
+class V4ReusableGenerator : public Xbyak::CodeGenerator {
+public:
+  V4ReusableGenerator() : Xbyak::CodeGenerator(sizeof(dummy_), dummy_) {}
+
+  Xbyak::CodeGenerator &retarget(void *buffer, size_t capacity) {
+    top_ = static_cast<uint8_t *>(buffer);
+    maxSize_ = capacity;
+    reset();
+    setDefaultJmpNEAR(false);
+    return *this;
+  }
+
+private:
+  uint8_t dummy_[16] = {};
+};
+
+Xbyak::CodeGenerator &v4_generator(void *buffer, size_t capacity) {
+  thread_local V4ReusableGenerator generator;
+  return generator.retarget(buffer, capacity);
+}
+
 class V4CodeArena {
 public:
   V4CodeArena() = default;
@@ -1221,6 +1260,24 @@ struct V4Block {
   bool second_icache_line = false;
   u8 icache_line_count = 0;
   bool retry_second_line = false;
+  // Mixed (V5) blocks span several guest I-cache lines. The dispatcher only
+  // validates the first line (revalidate_count instructions); each later line
+  // is checked in-block against its slot in v5_line_generations.
+  bool v5 = false;
+  u32 revalidate_count = 0;
+  std::array<u32, 10> v5_line_generations{};
+  // V5: PC of each instruction (a fused loop is not sequential), plus the
+  // sequential successor of the last one; read by the shared exit stubs.
+  std::array<u32, kV4MaxBlockInstructions + 1> v5_pcs{};
+  // Direct links jump here with r14 = this block. V5 blocks point it at a
+  // prologue holding the dispatcher checks; others at the generic linked
+  // entry.
+  void *linked_fn = nullptr;
+  // VIBESTATION_BLOCK_PROFILE diagnostics: dispatcher entries and why the
+  // translation ended (instruction word after it, or a V4 shape tag).
+  u64 profile_entries = 0;
+  u32 profile_end_bits = 0;
+  u8 profile_shape = 0;
 };
 
 // Cached-code validation is deliberately performed inside the resident x64
@@ -1284,10 +1341,17 @@ void emit_v4_selected_link(Xbyak::CodeGenerator &code,
     return;
   }
   code.mov(code.r14, code.ptr[code.r14]);
-  // The resident linked entry performs the same epoch, generation and budget
-  // checks as ordinary dispatch, without resolving the guest PC again.
-  code.mov(code.rax, reinterpret_cast<size_t>(links.entry));
-  code.jmp(code.rax);
+  // Enter the target through its own linked_fn: a V5 prologue with the
+  // dispatcher checks specialized, or the generic resident linked entry,
+  // which also handles an empty cell. Either way the fetch-refill adjustment
+  // of the block that just retired must not carry over.
+  code.test(code.r14, code.r14);
+  code.jz(static_cast<const void *>(links.entry));
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, current_block_refill_cycles))],
+      0u);
+  code.jmp(code.ptr[code.r14 + static_cast<int>(offsetof(V4Block, linked_fn))]);
 }
 
 void emit_v4_link(Xbyak::CodeGenerator &code, V4DispatchEntry *cell,
@@ -1549,10 +1613,40 @@ void emit_retire_incoming_load(Xbyak::CodeGenerator &code, u8 cancel_reg) {
   code.L(done);
 }
 
+// Cpu::exception() resets both GTE timing anchors to the exception's start
+// cycle (before its own two cycles). ebx is that resident cycle count; the
+// block's first instruction excludes a fetch refill charged before it began.
+enum class V4ExceptionAnchor : u8 { FirstInstruction, LaterInstruction, None };
+
+void emit_v4_exception_gte_anchor(Xbyak::CodeGenerator &code,
+                                  V4ExceptionAnchor anchor) {
+  if (anchor == V4ExceptionAnchor::None) {
+    return;
+  }
+  code.mov(code.eax, code.ebx);
+  if (anchor == V4ExceptionAnchor::FirstInstruction) {
+    code.sub(code.eax, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, current_block_refill_cycles))]);
+  }
+  code.add(code.rax, code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+  code.mov(code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, gte_result_ready_cycle))],
+      code.rax);
+  code.mov(code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, gte_input_ready_cycle))],
+      code.rax);
+}
+
 void emit_v4_exception_no_delay(Xbyak::CodeGenerator &code, Exception cause,
                                 u32 current_pc,
-                                u32 cop_index = 0xFFFFFFFFu) {
+                                u32 cop_index = 0xFFFFFFFFu,
+                                const Xbyak::Reg32 *pc_reg = nullptr,
+                                V4ExceptionAnchor anchor =
+                                    V4ExceptionAnchor::FirstInstruction) {
   using namespace Xbyak;
+  emit_v4_exception_gte_anchor(code, anchor);
 
   // R3000A exceptions commit the incoming load before entering the handler.
   emit_retire_incoming_load(code, 0u);
@@ -1591,13 +1685,16 @@ void emit_v4_exception_no_delay(Xbyak::CodeGenerator &code, Exception cause,
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_cause))],
       code.eax);
-  code.mov(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_epc))],
-      current_pc);
-
-  code.mov(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
-      current_pc);
+  // Shared stubs pass the faulting PC in a register (never EAX/ECX).
+  const auto store_pc = [&](size_t offset) {
+    if (pc_reg != nullptr) {
+      code.mov(code.dword[code.r11 + static_cast<int>(offset)], *pc_reg);
+    } else {
+      code.mov(code.dword[code.r11 + static_cast<int>(offset)], current_pc);
+    }
+  };
+  store_pc(offsetof(V4NativeState, cop0_epc));
+  store_pc(offsetof(V4NativeState, last_pc));
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
       0u);
@@ -1648,6 +1745,7 @@ void emit_v4_exception_pending_delay(Xbyak::CodeGenerator &code,
                                      Exception cause,
                                      u32 cop_index = 0xFFFFFFFFu) {
   using namespace Xbyak;
+  emit_v4_exception_gte_anchor(code, V4ExceptionAnchor::FirstInstruction);
 
   // The faulting instruction is the already-pending branch delay slot.
   // Commit an older delayed load, then build EPC/BD directly from the resident
@@ -1760,7 +1858,7 @@ V4NativeFn compile_v4_fixed_exception(V4CodeArena &arena,
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   emit_v4_exception_no_delay(code, cause, start_pc, cop_index);
   code.ready();
   code_size = static_cast<u32>(code.getSize());
@@ -1779,7 +1877,7 @@ V4NativeFn compile_v4_pending_delay_fixed_exception(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   emit_v4_exception_pending_delay(code, cause, cop_index);
   code.ready();
   code_size = static_cast<u32>(code.getSize());
@@ -1839,7 +1937,7 @@ V4NativeFn compile_v4_exception(V4CodeArena &arena,
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   const Exception cause =
       inst.op == V4ExceptionOp::Syscall ? Exception::Syscall : Exception::Break;
   emit_v4_exception_no_delay(code, cause, start_pc);
@@ -1862,7 +1960,7 @@ V4NativeFn compile_v4_overflow_alu(V4CodeArena &arena,
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   // The overflow slow path sits beyond the normal success epilogue and direct
   // link sequence, so force a near conditional branch instead of relying on
   // Xbyak's short forward-jump form.
@@ -1922,7 +2020,7 @@ V4NativeFn compile_v4_pending_delay_hilo(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
 
   Label ready;
@@ -1992,22 +2090,10 @@ V4NativeFn compile_v4_pending_delay_hilo(
   return reinterpret_cast<V4NativeFn>(buffer);
 }
 
-V4NativeFn compile_v4_hilo(V4CodeArena &arena,
-                               const V4DecodedHiLo &inst,
-                               u32 start_pc,
-                               const V4LinkTargets &links,
-                               u32 &code_size) {
+// MFHI/MFLO/MTHI/MTLO including the HI/LO scoreboard stall (EBX is the
+// instruction's issue cycle). Returns the GPR the instruction writes.
+u8 emit_v4_hilo_body(Xbyak::CodeGenerator &code, const V4DecodedHiLo &inst) {
   using namespace Xbyak;
-  constexpr size_t kReservation = 768u;
-  void *buffer = arena.begin_emit(kReservation);
-  if (buffer == nullptr) {
-    return nullptr;
-  }
-  CodeGenerator code(kReservation, buffer);
-
-  // Keep HI/LO transfers as one-instruction blocks so EBX is the exact cycle
-  // offset at which the operation issues. This matches the interpreter's
-  // multiply/divide scoreboard without forcing a helper transition.
   Label ready;
   code.mov(code.rax, code.qword[
       code.r11 + static_cast<int>(offsetof(V4NativeState,
@@ -2064,6 +2150,183 @@ V4NativeFn compile_v4_hilo(V4CodeArena &arena,
     break;
   }
 
+  return cancel_reg;
+}
+
+// MULT/MULTU/DIV/DIVU: scoreboard stall, result and new ready cycle.
+void emit_v4_muldiv_body(Xbyak::CodeGenerator &code,
+                         const V4DecodedMulDiv &inst) {
+  using namespace Xbyak;
+  Label muldiv_ready;
+  code.mov(code.rax, code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState,
+                                           muldiv_result_ready_cycle))]);
+  code.mov(code.rcx, code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+  code.add(code.rcx, code.rbx);
+  code.inc(code.rcx);
+  code.cmp(code.rax, code.rcx);
+  code.jbe(muldiv_ready);
+  code.sub(code.rax, code.rcx);
+  code.add(code.ebx, code.eax);
+  code.L(muldiv_ready);
+
+  emit_read_guest(code, code.eax, inst.rs);
+  emit_read_guest(code, code.ecx, inst.rt);
+
+  Label result_ready, div_zero, div_overflow;
+  u32 fixed_ticks = 0u;
+  switch (inst.op) {
+  case V4MulDivOp::Mult: {
+    code.mov(code.r8d, code.eax);
+    code.imul(code.ecx);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, lo))], code.eax);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, hi))], code.edx);
+
+    Label negative, ticks6, ticks9, ticks13, ticks_done;
+    code.test(code.r8d, code.r8d);
+    code.js(negative);
+    code.cmp(code.r8d, 0x800u);
+    code.jb(ticks6);
+    code.cmp(code.r8d, 0x100000u);
+    code.jb(ticks9);
+    code.jmp(ticks13);
+    code.L(negative);
+    code.cmp(code.r8d, static_cast<u32>(-2048));
+    code.jae(ticks6);
+    code.cmp(code.r8d, static_cast<u32>(-1048576));
+    code.jae(ticks9);
+    code.L(ticks13);
+    code.mov(code.edx, 13u);
+    code.jmp(ticks_done);
+    code.L(ticks9);
+    code.mov(code.edx, 9u);
+    code.jmp(ticks_done);
+    code.L(ticks6);
+    code.mov(code.edx, 6u);
+    code.L(ticks_done);
+    break;
+  }
+  case V4MulDivOp::Multu: {
+    code.mov(code.r8d, code.eax);
+    code.mul(code.ecx);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, lo))], code.eax);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, hi))], code.edx);
+
+    Label ticks6, ticks9, ticks_done;
+    code.cmp(code.r8d, 0x800u);
+    code.jb(ticks6);
+    code.cmp(code.r8d, 0x100000u);
+    code.jb(ticks9);
+    code.mov(code.edx, 13u);
+    code.jmp(ticks_done);
+    code.L(ticks9);
+    code.mov(code.edx, 9u);
+    code.jmp(ticks_done);
+    code.L(ticks6);
+    code.mov(code.edx, 6u);
+    code.L(ticks_done);
+    break;
+  }
+  case V4MulDivOp::Div:
+    fixed_ticks = 36u;
+    code.test(code.ecx, code.ecx);
+    code.jz(div_zero);
+    code.cmp(code.eax, 0x80000000u);
+    code.jne(div_overflow);
+    code.cmp(code.ecx, 0xFFFFFFFFu);
+    code.je(result_ready);
+    code.L(div_overflow);
+    code.cdq();
+    code.idiv(code.ecx);
+    code.jmp(result_ready);
+    code.L(div_zero);
+    {
+      Label negative_dividend, div_zero_done;
+      code.mov(code.edx, code.eax);
+      code.test(code.eax, code.eax);
+      code.js(negative_dividend);
+      code.mov(code.eax, 0xFFFFFFFFu);
+      code.jmp(div_zero_done);
+      code.L(negative_dividend);
+      code.mov(code.eax, 1u);
+      code.L(div_zero_done);
+    }
+    code.jmp(result_ready);
+    // Signed overflow: quotient = INT_MIN, remainder = 0.
+    code.L(result_ready);
+    // If divisor was -1 with INT_MIN dividend EAX already contains INT_MIN;
+    // EDX is made zero below before committing the architectural result.
+    break;
+  case V4MulDivOp::Divu:
+    fixed_ticks = 36u;
+    code.test(code.ecx, code.ecx);
+    code.jz(div_zero);
+    code.xor_(code.edx, code.edx);
+    code.div(code.ecx);
+    code.jmp(result_ready);
+    code.L(div_zero);
+    code.mov(code.edx, code.eax);
+    code.mov(code.eax, 0xFFFFFFFFu);
+    code.L(result_ready);
+    break;
+  }
+
+  if (inst.op == V4MulDivOp::Div) {
+    // Repair the INT_MIN / -1 special case without relying on host #DE.
+    Label not_overflow_commit;
+    emit_read_guest(code, code.r8d, inst.rs);
+    emit_read_guest(code, code.r9d, inst.rt);
+    code.cmp(code.r8d, 0x80000000u);
+    code.jne(not_overflow_commit);
+    code.cmp(code.r9d, 0xFFFFFFFFu);
+    code.jne(not_overflow_commit);
+    code.mov(code.eax, 0x80000000u);
+    code.xor_(code.edx, code.edx);
+    code.L(not_overflow_commit);
+  }
+
+  if (inst.op == V4MulDivOp::Div || inst.op == V4MulDivOp::Divu) {
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, lo))], code.eax);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, hi))], code.edx);
+    code.mov(code.edx, fixed_ticks);
+  }
+
+  // ready_cycle = current issue cycle (including an older HI/LO stall) + latency.
+  code.mov(code.rax, code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+  code.add(code.rax, code.rbx);
+  code.add(code.rax, code.rdx);
+  code.mov(code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState,
+                                           muldiv_result_ready_cycle))],
+      code.rax);
+
+}
+
+V4NativeFn compile_v4_hilo(V4CodeArena &arena,
+                               const V4DecodedHiLo &inst,
+                               u32 start_pc,
+                               const V4LinkTargets &links,
+                               u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 768u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator &code = v4_generator(buffer, kReservation);
+
+  // Keep HI/LO transfers as one-instruction blocks so EBX is the exact cycle
+  // offset at which the operation issues. This matches the interpreter's
+  // multiply/divide scoreboard without forcing a helper transition.
+  const u8 cancel_reg = emit_v4_hilo_body(code, inst);
   emit_retire_incoming_load(code, cancel_reg);
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
@@ -2097,7 +2360,7 @@ V4NativeFn compile_v4_pending_delay_muldiv(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
 
   // MULT/DIV may legally occupy a branch delay slot. Keep the full asynchronous
@@ -2278,163 +2541,13 @@ V4NativeFn compile_v4_muldiv(V4CodeArena &arena,
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
 
   // MULT/DIV share the same asynchronous HI/LO scoreboard as MFHI/MFLO.
   // Keep the complete operation in generated x64 so a normal guest opcode
   // never needs Cpu::run_compiled_opcode() just to preserve timing.
-  Label muldiv_ready;
-  code.mov(code.rax, code.qword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState,
-                                           muldiv_result_ready_cycle))]);
-  code.mov(code.rcx, code.qword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
-  code.add(code.rcx, code.rbx);
-  code.inc(code.rcx);
-  code.cmp(code.rax, code.rcx);
-  code.jbe(muldiv_ready);
-  code.sub(code.rax, code.rcx);
-  code.add(code.ebx, code.eax);
-  code.L(muldiv_ready);
-
-  emit_read_guest(code, code.eax, inst.rs);
-  emit_read_guest(code, code.ecx, inst.rt);
-
-  Label result_ready, div_zero, div_overflow;
-  u32 fixed_ticks = 0u;
-  switch (inst.op) {
-  case V4MulDivOp::Mult: {
-    code.mov(code.r8d, code.eax);
-    code.imul(code.ecx);
-    code.mov(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, lo))], code.eax);
-    code.mov(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, hi))], code.edx);
-
-    Label negative, ticks6, ticks9, ticks13, ticks_done;
-    code.test(code.r8d, code.r8d);
-    code.js(negative);
-    code.cmp(code.r8d, 0x800u);
-    code.jb(ticks6);
-    code.cmp(code.r8d, 0x100000u);
-    code.jb(ticks9);
-    code.jmp(ticks13);
-    code.L(negative);
-    code.cmp(code.r8d, static_cast<u32>(-2048));
-    code.jae(ticks6);
-    code.cmp(code.r8d, static_cast<u32>(-1048576));
-    code.jae(ticks9);
-    code.L(ticks13);
-    code.mov(code.edx, 13u);
-    code.jmp(ticks_done);
-    code.L(ticks9);
-    code.mov(code.edx, 9u);
-    code.jmp(ticks_done);
-    code.L(ticks6);
-    code.mov(code.edx, 6u);
-    code.L(ticks_done);
-    break;
-  }
-  case V4MulDivOp::Multu: {
-    code.mov(code.r8d, code.eax);
-    code.mul(code.ecx);
-    code.mov(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, lo))], code.eax);
-    code.mov(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, hi))], code.edx);
-
-    Label ticks6, ticks9, ticks_done;
-    code.cmp(code.r8d, 0x800u);
-    code.jb(ticks6);
-    code.cmp(code.r8d, 0x100000u);
-    code.jb(ticks9);
-    code.mov(code.edx, 13u);
-    code.jmp(ticks_done);
-    code.L(ticks9);
-    code.mov(code.edx, 9u);
-    code.jmp(ticks_done);
-    code.L(ticks6);
-    code.mov(code.edx, 6u);
-    code.L(ticks_done);
-    break;
-  }
-  case V4MulDivOp::Div:
-    fixed_ticks = 36u;
-    code.test(code.ecx, code.ecx);
-    code.jz(div_zero);
-    code.cmp(code.eax, 0x80000000u);
-    code.jne(div_overflow);
-    code.cmp(code.ecx, 0xFFFFFFFFu);
-    code.je(result_ready);
-    code.L(div_overflow);
-    code.cdq();
-    code.idiv(code.ecx);
-    code.jmp(result_ready);
-    code.L(div_zero);
-    {
-      Label negative_dividend, div_zero_done;
-      code.mov(code.edx, code.eax);
-      code.test(code.eax, code.eax);
-      code.js(negative_dividend);
-      code.mov(code.eax, 0xFFFFFFFFu);
-      code.jmp(div_zero_done);
-      code.L(negative_dividend);
-      code.mov(code.eax, 1u);
-      code.L(div_zero_done);
-    }
-    code.jmp(result_ready);
-    // Signed overflow: quotient = INT_MIN, remainder = 0.
-    code.L(result_ready);
-    // If divisor was -1 with INT_MIN dividend EAX already contains INT_MIN;
-    // EDX is made zero below before committing the architectural result.
-    break;
-  case V4MulDivOp::Divu:
-    fixed_ticks = 36u;
-    code.test(code.ecx, code.ecx);
-    code.jz(div_zero);
-    code.xor_(code.edx, code.edx);
-    code.div(code.ecx);
-    code.jmp(result_ready);
-    code.L(div_zero);
-    code.mov(code.edx, code.eax);
-    code.mov(code.eax, 0xFFFFFFFFu);
-    code.L(result_ready);
-    break;
-  }
-
-  if (inst.op == V4MulDivOp::Div) {
-    // Repair the INT_MIN / -1 special case without relying on host #DE.
-    Label not_overflow_commit;
-    emit_read_guest(code, code.r8d, inst.rs);
-    emit_read_guest(code, code.r9d, inst.rt);
-    code.cmp(code.r8d, 0x80000000u);
-    code.jne(not_overflow_commit);
-    code.cmp(code.r9d, 0xFFFFFFFFu);
-    code.jne(not_overflow_commit);
-    code.mov(code.eax, 0x80000000u);
-    code.xor_(code.edx, code.edx);
-    code.L(not_overflow_commit);
-  }
-
-  if (inst.op == V4MulDivOp::Div || inst.op == V4MulDivOp::Divu) {
-    code.mov(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, lo))], code.eax);
-    code.mov(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, hi))], code.edx);
-    code.mov(code.edx, fixed_ticks);
-  }
-
-  // ready_cycle = current issue cycle (including an older HI/LO stall) + latency.
-  code.mov(code.rax, code.qword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
-  code.add(code.rax, code.rbx);
-  code.add(code.rax, code.rdx);
-  code.mov(code.qword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState,
-                                           muldiv_result_ready_cycle))],
-      code.rax);
-
+  emit_v4_muldiv_body(code, inst);
   emit_retire_incoming_load(code, 0u);
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
@@ -2473,7 +2586,7 @@ V4NativeFn compile_v4_pending_delay_cop2_register(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
 
   auto emit_result_stall = [&]() {
@@ -2679,7 +2792,7 @@ V4NativeFn compile_v4_pending_delay_cop2(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
 
   auto emit_result_stall = [&]() {
@@ -3075,7 +3188,7 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
 
   auto emit_result_stall = [&]() {
@@ -3570,7 +3683,7 @@ V4NativeFn compile_v4_pending_delay_cop0(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
 
   switch (inst.op) {
@@ -3637,7 +3750,7 @@ V4NativeFn compile_v4_cop0(V4CodeArena &arena,
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
 
   switch (inst.op) {
@@ -4198,7 +4311,7 @@ V4NativeFn compile_v4_cond_move(V4CodeArena &arena,
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
   Label no_write, retired;
 
@@ -4251,7 +4364,7 @@ V4NativeFn compile_v4_pending_delay_cond_move(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
   Label no_write, retired;
 
@@ -4325,7 +4438,7 @@ V4NativeFn compile_v4_trap(V4CodeArena &arena,
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
   Label no_trap;
 
@@ -4375,7 +4488,7 @@ V4NativeFn compile_v4_pending_delay_trap(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
   Label no_trap;
 
@@ -4446,7 +4559,7 @@ V4NativeFn compile_v4_compat_unknown(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
 
   const u32 primary = (instruction >> 26) & 0x3Fu;
   const u8 clear_reg =
@@ -4488,7 +4601,7 @@ V4NativeFn compile_v4_pending_delay_compat_unknown(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
 
   const u32 primary = (instruction >> 26) & 0x3Fu;
   const u8 clear_reg =
@@ -4552,7 +4665,7 @@ V4NativeFn compile_v4_alu(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
 
   emit_v4_alu_sequence(code, decoded.data(), count, true);
 
@@ -4589,7 +4702,7 @@ V4NativeFn compile_v4_pending_delay_alu(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
 
   // The branch decision and target were captured by the previous scheduler
   // slice. Execute only the already-pending delay-slot instruction here, then
@@ -4651,7 +4764,7 @@ V4NativeFn compile_v4_pending_delay_overflow_alu(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   // The overflow bailout is past the normal success epilogue, so force near
   // conditional branches rather than relying on Xbyak's short forward form.
   code.setDefaultJmpNEAR(true);
@@ -4731,7 +4844,7 @@ V4NativeFn compile_v4_pending_delay_load(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
   Label ram, scratch, device, loaded, unaligned, bail;
 
@@ -5005,7 +5118,7 @@ V4NativeFn compile_v4_pending_delay_store(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
   Label ram, scratch, device, isolated, stored, unaligned, bail;
 
@@ -5509,7 +5622,7 @@ V4NativeFn compile_v4_pending_delay_control(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
   Label not_taken, taken, finish, likely_not_taken;
 
@@ -5774,7 +5887,7 @@ V4NativeFn compile_v4_budget_branch(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   Label not_taken, selected;
 
   const u32 fallthrough = branch_pc + 8u;
@@ -5933,7 +6046,7 @@ V4NativeFn compile_v4_likely_branch_head(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
   Label not_taken, taken_ready;
 
@@ -6071,7 +6184,7 @@ V4NativeFn compile_v4_branch(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
 
   V4AluRegisterCache prefix_cache{};
   emit_v4_alu_sequence_cached(code, prefix.data(), prefix_count, true,
@@ -6241,7 +6354,7 @@ V4NativeFn compile_v4_guarded_delay_branch(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
   Label bail, not_taken, selected;
 
@@ -6352,7 +6465,7 @@ V4NativeFn compile_v4_store_delay_branch(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
   Label ram, stored, bail, not_taken, selected;
 
@@ -6551,7 +6664,7 @@ V4NativeFn compile_v4_load(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
   Label ram, scratch, hot_mmio16, device, loaded, unaligned, slow_after_prefix, bail;
   Label &slow_exit = prefix_count != 0u ? slow_after_prefix : bail;
@@ -7114,7 +7227,10 @@ V4NativeFn compile_v4_load(
     code.sub(code.r12d, prefix_count);
   }
   emit_v4_exception_no_delay(code, Exception::AddrLoadErr,
-                             start_pc + prefix_count * 4u);
+                             start_pc + prefix_count * 4u, 0xFFFFFFFFu, nullptr,
+                             prefix_count != 0u
+                                 ? V4ExceptionAnchor::LaterInstruction
+                                 : V4ExceptionAnchor::FirstInstruction);
 
   code.L(slow_after_prefix);
   if (prefix_count != 0u) {
@@ -7163,7 +7279,7 @@ V4NativeFn compile_v4_store(
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
   Label ram, scratch, memory_guard, device, isolated, stored,
       stop_after_store, unaligned, slow_after_prefix, bail;
@@ -7839,7 +7955,10 @@ V4NativeFn compile_v4_store(
       code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_badvaddr))],
       code.eax);
   emit_v4_exception_no_delay(code, Exception::AddrStoreErr,
-                             start_pc + prefix_count * 4u);
+                             start_pc + prefix_count * 4u, 0xFFFFFFFFu, nullptr,
+                             prefix_count != 0u
+                                 ? V4ExceptionAnchor::LaterInstruction
+                                 : V4ExceptionAnchor::FirstInstruction);
 
   code.L(slow_after_prefix);
   if (prefix_count != 0u) {
@@ -7868,6 +7987,2201 @@ V4NativeFn compile_v4_store(
   if (!arena.commit_emit(buffer, code_size)) {
     return nullptr;
   }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
+// ── V5 mixed blocks ────────────────────────────────────────────────
+//
+// V4 fragments hold at most one memory access and stay inside one guest
+// I-cache line, so hot code averaged under two guest instructions per
+// dispatcher pass. A V5 block is a straight run of ALU, load and store
+// instructions, optionally ended by a branch with an ALU delay slot. It may
+// span every I-cache line of up to kV4MaxBlockInstructions words of one page.
+//
+// Exactness is that of successive Cpu::step() calls:
+//  - Before every instruction after the first, the block leaves at that
+//    boundary once ebx (elapsed cycles) has reached r13d (the slice budget).
+//    A branch only starts when its delay slot is certain to start as well.
+//  - Each later I-cache line is checked against its recorded generation
+//    before its first instruction runs. A changed generation is revalidated
+//    in place (valid, tag, words); a line that is not resident ends the block
+//    at that line, so the dispatcher performs the architectural refill.
+//  - Device accesses, isolated-cache stores and address errors end the block
+//    at their instruction exactly like the V4 fragments.
+
+enum class V5Kind : u8 {
+  Alu,
+  Load,
+  Store,
+  Branch,
+  HiLo,
+  MulDiv,
+  Overflow,
+  Cop2,    // MFC2/CFC2/MTC2/CTC2 and GTE commands
+  Cop2Mem, // LWC2/SWC2 (never in a delay slot)
+};
+
+struct V5Instruction {
+  V5Kind kind = V5Kind::Alu;
+  u32 pc = 0;
+  u32 bits = 0;
+  V4DecodedInstruction alu{};
+  V4DecodedLoad load{};
+  V4DecodedStore store{};
+  V4DecodedControl control{};
+  V4DecodedHiLo hilo{};
+  V4DecodedMulDiv muldiv{};
+  V4DecodedOverflowAlu overflow{};
+  V4DecodedCop2 cop2{};
+  // Mid-block (superblock) conditional branch: its taken edge's cell.
+  V4DispatchEntry *taken_cell = nullptr;
+  // Mid-block branch of a fused loop: the taken edge stays in the block and
+  // taken_cell is the not-taken (fall-through) edge's cell instead.
+  bool continue_taken = false;
+};
+
+struct V5LineCheck {
+  u32 before_index = 0;      // emitted at the boundary before this instruction
+  u32 slot = 0;              // V4Block::v5_line_generations index
+  u32 icache_index = 0;
+  u32 tag = 0;
+  u32 first_instruction = 0; // first block instruction in the line
+  u32 first_word = 0;        // its word within the line
+  u32 word_count = 0;
+};
+
+struct V5BlockPlan {
+  std::array<V5Instruction, kV4MaxBlockInstructions> insts{};
+  u32 count = 0;
+  bool ends_with_branch = false;
+  bool cacheable = false;
+  // Uncached code observes RAM directly: a store into a translated line must
+  // end the block, as in the V4 fragments.
+  bool stop_on_code_store = false;
+  std::array<V5LineCheck, 10> checks{};
+  u32 check_count = 0;
+  u32 icache_line_stride = 0;
+  u32 phys_page = 0;
+  // Branch-first block whose delay slot opens line 1: the dispatcher (and
+  // the linked prologue) validate that line like a V4 crossline branch.
+  bool second_line = false;
+  bool count_entries = false; // VIBESTATION_BLOCK_PROFILE
+  // Leading instructions fetched from line 0 (the dispatcher and the linked
+  // prologue validate exactly these).
+  u32 line0_words = 0;
+  u32 second_line_index = 0;
+  u32 second_line_generation = 0;
+};
+
+// EAX = old aligned word, R8D = register value, R9D = byte offset.
+// Returns the merged word in EAX.
+void emit_v5_unaligned_store_merge(Xbyak::CodeGenerator &code, V4StoreOp op) {
+  using namespace Xbyak;
+  Label off0, off1, off2, merged;
+  code.test(code.r9d, code.r9d);
+  code.jz(off0);
+  code.cmp(code.r9d, 1u);
+  code.je(off1);
+  code.cmp(code.r9d, 2u);
+  code.je(off2);
+  if (op == V4StoreOp::Swl) {
+    code.mov(code.eax, code.r8d);
+    code.jmp(merged);
+    code.L(off0);
+    code.and_(code.eax, 0xFFFFFF00u);
+    code.shr(code.r8d, 24);
+    code.or_(code.eax, code.r8d);
+    code.jmp(merged);
+    code.L(off1);
+    code.and_(code.eax, 0xFFFF0000u);
+    code.shr(code.r8d, 16);
+    code.or_(code.eax, code.r8d);
+    code.jmp(merged);
+    code.L(off2);
+    code.and_(code.eax, 0xFF000000u);
+    code.shr(code.r8d, 8);
+    code.or_(code.eax, code.r8d);
+  } else {
+    code.and_(code.eax, 0x00FFFFFFu);
+    code.shl(code.r8d, 24);
+    code.or_(code.eax, code.r8d);
+    code.jmp(merged);
+    code.L(off0);
+    code.mov(code.eax, code.r8d);
+    code.jmp(merged);
+    code.L(off1);
+    code.and_(code.eax, 0x000000FFu);
+    code.shl(code.r8d, 8);
+    code.or_(code.eax, code.r8d);
+    code.jmp(merged);
+    code.L(off2);
+    code.and_(code.eax, 0x0000FFFFu);
+    code.shl(code.r8d, 16);
+    code.or_(code.eax, code.r8d);
+  }
+  code.L(merged);
+}
+
+// R8D = loaded aligned word, load_byte_offset in the native state. Merges it
+// into the architecturally visible rt (a pending load to rt is the source).
+void emit_v5_unaligned_load_merge(Xbyak::CodeGenerator &code,
+                                  const V4DecodedLoad &load) {
+  using namespace Xbyak;
+  emit_read_guest(code, code.ecx, load.rt);
+  {
+    Label use_gpr_value;
+    code.cmp(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
+        static_cast<u32>(load.rt));
+    code.jne(use_gpr_value);
+    code.mov(code.ecx, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, pending_load_value))]);
+    code.L(use_gpr_value);
+  }
+  Label merge0, merge1, merge2, merge_done;
+  code.mov(code.edx, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, load_byte_offset))]);
+  code.test(code.edx, code.edx);
+  code.jz(merge0);
+  code.cmp(code.edx, 1u);
+  code.je(merge1);
+  code.cmp(code.edx, 2u);
+  code.je(merge2);
+  if (load.op == V4LoadOp::Lwl) {
+    code.jmp(merge_done);
+    code.L(merge0);
+    code.and_(code.ecx, 0x00FFFFFFu);
+    code.shl(code.r8d, 24);
+    code.or_(code.r8d, code.ecx);
+    code.jmp(merge_done);
+    code.L(merge1);
+    code.and_(code.ecx, 0x0000FFFFu);
+    code.shl(code.r8d, 16);
+    code.or_(code.r8d, code.ecx);
+    code.jmp(merge_done);
+    code.L(merge2);
+    code.and_(code.ecx, 0x000000FFu);
+    code.shl(code.r8d, 8);
+    code.or_(code.r8d, code.ecx);
+  } else {
+    code.shr(code.r8d, 24);
+    code.and_(code.ecx, 0xFFFFFF00u);
+    code.or_(code.r8d, code.ecx);
+    code.jmp(merge_done);
+    code.L(merge0);
+    code.jmp(merge_done);
+    code.L(merge1);
+    code.shr(code.r8d, 8);
+    code.and_(code.ecx, 0xFF000000u);
+    code.or_(code.r8d, code.ecx);
+    code.jmp(merge_done);
+    code.L(merge2);
+    code.shr(code.r8d, 16);
+    code.and_(code.ecx, 0xFFFF0000u);
+    code.or_(code.r8d, code.ecx);
+  }
+  code.L(merge_done);
+}
+
+// Calls fn(System*, EDX = address, R8D, R9D) keeping the resident bases. R8D
+// is the cycle (reads) or the value (writes, R9D = cycle): the Win64
+// argument registers, remapped here for SysV.
+void emit_v5_bus_call(Xbyak::CodeGenerator &code, size_t fn) {
+  code.push(code.r10);
+  code.push(code.r11);
+#if defined(_WIN32)
+  code.sub(code.rsp, 32);
+  code.mov(code.rcx, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+#else
+  code.mov(code.rdi, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+  code.mov(code.esi, code.edx);
+  code.mov(code.edx, code.r8d);
+  code.mov(code.ecx, code.r9d);
+#endif
+  code.mov(code.rax, fn);
+  code.call(code.rax);
+#if defined(_WIN32)
+  code.add(code.rsp, 32);
+#endif
+  code.pop(code.r11);
+  code.pop(code.r10);
+}
+
+// Diagnostics for VIBESTATION_BLOCK_PROFILE: bytes of V5 code on the
+// straight-line path versus all V5 code.
+u64 g_v5_hot_bytes = 0;
+u64 g_v5_total_bytes = 0;
+
+// Out-of-line tails shared by every V5 block, so a side exit costs a few
+// bytes per block. All expect r14 = the executing V4Block and ECX = the
+// number of retired block instructions (the faulting index for exceptions,
+// whose EAX holds the bad virtual address and EDX is non-zero when that
+// instruction was the first fetched from its line).
+struct V5Stubs {
+  const void *exit = nullptr;
+  const void *address_load_error = nullptr;
+  const void *address_store_error = nullptr;
+  const void *overflow = nullptr;
+  const void *line_check = nullptr;
+  std::array<const void *, 7> device_load{};   // by V4LoadOp
+  std::array<const void *, 5> device_store{};  // by V4StoreOp
+  std::array<const void *, 2> isolated_store{}; // [SWL/SWR]
+};
+
+bool install_v5_stubs(V4CodeArena &arena, V5Stubs &stubs) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 16384u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return false;
+  }
+  CodeGenerator &code = v4_generator(buffer, kReservation);
+  code.setDefaultJmpNEAR(true);
+  const auto state = [&](size_t offset) {
+    return code.dword[code.r11 + static_cast<int>(offset)];
+  };
+
+  stubs.exit = code.getCurr();
+  code.mov(code.r13d, state(offsetof(V4NativeState, cycle_budget)));
+  code.sub(code.r12d, code.ecx);
+  // V5 blocks may be non-sequential (fused loops): PCs come from the
+  // block's table: v5_pcs[n] is the PC of instruction n (v5_pcs[count] the
+  // sequential successor of the last one).
+  code.mov(code.eax, code.dword[code.r14 + code.rcx * 4 +
+                                static_cast<int>(offsetof(V4Block, v5_pcs))]);
+  code.mov(state(offsetof(V4NativeState, pc)), code.eax);
+  code.mov(code.eax, code.dword[code.r14 + code.rcx * 4 +
+                                static_cast<int>(offsetof(V4Block, v5_pcs)) - 4]);
+  code.mov(state(offsetof(V4NativeState, last_pc)), code.eax);
+  code.mov(state(offsetof(V4NativeState, last_in_delay_slot)), 0u);
+  code.mov(state(offsetof(V4NativeState, active_branch_pc)), 0u);
+  emit_v4_block_return(code);
+
+  const auto emit_exception_stub = [&](Exception cause) {
+    code.align(16);
+    const void *entry = code.getCurr();
+    if (cause != Exception::Overflow) {
+      code.mov(state(offsetof(V4NativeState, cop0_badvaddr)), code.eax);
+    }
+    code.mov(code.r13d, state(offsetof(V4NativeState, cycle_budget)));
+    code.sub(code.r12d, code.ecx);
+    code.mov(code.r8d, code.dword[code.r14 + code.rcx * 4 +
+                                  static_cast<int>(offsetof(V4Block, v5_pcs))]);
+    {
+      Label later, anchored;
+      // EDX != 0: the faulting instruction is the first fetched from its
+      // line in this block entry, so a refill before it is pre-fetch time.
+      code.test(code.edx, code.edx);
+      code.jz(later);
+      emit_v4_exception_gte_anchor(code, V4ExceptionAnchor::FirstInstruction);
+      code.jmp(anchored);
+      code.L(later);
+      emit_v4_exception_gte_anchor(code, V4ExceptionAnchor::LaterInstruction);
+      code.L(anchored);
+    }
+    emit_v4_exception_no_delay(code, cause, 0u, 0xFFFFFFFFu, &code.r8d,
+                               V4ExceptionAnchor::None);
+    return entry;
+  };
+  stubs.address_load_error = emit_exception_stub(Exception::AddrLoadErr);
+  stubs.address_store_error = emit_exception_stub(Exception::AddrStoreErr);
+  stubs.overflow = emit_exception_stub(Exception::Overflow);
+
+  // Device accesses (jumped to from a block, r14 = block). They end the
+  // block after the instruction, like the V4 fragments.
+  //   ECX = instruction index | rt << 8 (loads) | retire incoming << 16 |
+  //         first fetched from its line << 17
+  // Loads: EDX = physical address (aligned; LWL/LWR byte offset already in
+  // load_byte_offset). Stores: store_phys/store_value (and store_byte_offset
+  // for SWL/SWR) already written. The packed word lives in store_hits_code,
+  // which V5 code does not otherwise use.
+  const auto emit_stub_cycle_arg = [&](const Reg32 &arg) {
+    Label no_adjust;
+    code.mov(arg, code.ebx);
+    code.test(state(offsetof(V4NativeState, store_hits_code)), 1u << 17);
+    code.jz(no_adjust);
+    code.sub(arg, state(offsetof(V4NativeState, current_block_refill_cycles)));
+    code.L(no_adjust);
+  };
+  const auto emit_stub_retire = [&](bool cancel_rt) {
+    // Retire the incoming load if the packed word asks for it; a load
+    // cancels it when it targets the same register (rt in EDX).
+    Label done, clear;
+    code.test(state(offsetof(V4NativeState, store_hits_code)), 1u << 16);
+    code.jz(done);
+    code.mov(code.eax, state(offsetof(V4NativeState, pending_load_reg)));
+    code.test(code.eax, code.eax);
+    code.jz(done);
+    if (cancel_rt) {
+      code.cmp(code.eax, code.edx);
+      code.je(clear);
+    }
+    code.mov(code.ecx, state(offsetof(V4NativeState, pending_load_value)));
+    code.mov(code.dword[code.r10 + code.rax * 4], code.ecx);
+    code.L(clear);
+    code.mov(state(offsetof(V4NativeState, pending_load_reg)), 0u);
+    code.mov(state(offsetof(V4NativeState, pending_load_value)), 0u);
+    code.L(done);
+  };
+  const auto emit_stub_exit_after = [&]() {
+    code.movzx(code.ecx, code.byte[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_hits_code))]);
+    code.inc(code.ecx);
+    code.jmp(stubs.exit);
+  };
+  for (u32 op = 0; op < 7u; ++op) {
+    const V4LoadOp load_op = static_cast<V4LoadOp>(op);
+    code.align(16);
+    stubs.device_load[op] = code.getCurr();
+    code.mov(state(offsetof(V4NativeState, store_hits_code)), code.ecx);
+    emit_stub_cycle_arg(code.r8d);
+    size_t fn = reinterpret_cast<size_t>(&v4_bus_read32);
+    if (load_op == V4LoadOp::Lb || load_op == V4LoadOp::Lbu) {
+      fn = reinterpret_cast<size_t>(&v4_bus_read8);
+    } else if (load_op == V4LoadOp::Lh || load_op == V4LoadOp::Lhu) {
+      fn = reinterpret_cast<size_t>(&v4_bus_read16);
+    }
+    emit_v5_bus_call(code, fn);
+    code.mov(state(offsetof(V4NativeState, host_timing_boundary)), 1u);
+    if (load_op == V4LoadOp::Lb) {
+      code.movsx(code.r8d, code.al);
+    } else if (load_op == V4LoadOp::Lh) {
+      code.movsx(code.r8d, code.ax);
+    } else {
+      code.mov(code.r8d, code.eax);
+    }
+    // EDX = rt for the merge, the retire and the new pending load.
+    code.movzx(code.edx, code.byte[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_hits_code)) + 1]);
+    if (load_op == V4LoadOp::Lwl || load_op == V4LoadOp::Lwr) {
+      // Merge into the architecturally visible rt (a pending load to rt is
+      // the source), as emit_v5_unaligned_load_merge does for a known rt.
+      Label use_gpr, have_old, merge0, merge1, merge2, merged;
+      code.mov(code.ecx, code.dword[code.r10 + code.rdx * 4]);
+      code.cmp(state(offsetof(V4NativeState, pending_load_reg)), code.edx);
+      code.jne(have_old);
+      code.mov(code.ecx, state(offsetof(V4NativeState, pending_load_value)));
+      code.L(have_old);
+      code.mov(code.eax, state(offsetof(V4NativeState, load_byte_offset)));
+      code.test(code.eax, code.eax);
+      code.jz(merge0);
+      code.cmp(code.eax, 1u);
+      code.je(merge1);
+      code.cmp(code.eax, 2u);
+      code.je(merge2);
+      if (load_op == V4LoadOp::Lwl) {
+        code.jmp(merged);
+        code.L(merge0);
+        code.and_(code.ecx, 0x00FFFFFFu);
+        code.shl(code.r8d, 24);
+        code.or_(code.r8d, code.ecx);
+        code.jmp(merged);
+        code.L(merge1);
+        code.and_(code.ecx, 0x0000FFFFu);
+        code.shl(code.r8d, 16);
+        code.or_(code.r8d, code.ecx);
+        code.jmp(merged);
+        code.L(merge2);
+        code.and_(code.ecx, 0x000000FFu);
+        code.shl(code.r8d, 8);
+        code.or_(code.r8d, code.ecx);
+      } else {
+        code.shr(code.r8d, 24);
+        code.and_(code.ecx, 0xFFFFFF00u);
+        code.or_(code.r8d, code.ecx);
+        code.jmp(merged);
+        code.L(merge0);
+        code.jmp(merged);
+        code.L(merge1);
+        code.shr(code.r8d, 8);
+        code.and_(code.ecx, 0xFF000000u);
+        code.or_(code.r8d, code.ecx);
+        code.jmp(merged);
+        code.L(merge2);
+        code.shr(code.r8d, 16);
+        code.and_(code.ecx, 0xFFFF0000u);
+        code.or_(code.r8d, code.ecx);
+      }
+      code.L(merged);
+      (void)use_gpr;
+    }
+    emit_stub_retire(true);
+    {
+      Label no_pending;
+      code.test(code.edx, code.edx);
+      code.jz(no_pending);
+      code.mov(state(offsetof(V4NativeState, pending_load_reg)), code.edx);
+      code.mov(state(offsetof(V4NativeState, pending_load_value)), code.r8d);
+      code.L(no_pending);
+    }
+    code.add(code.ebx, 2u);
+    emit_stub_exit_after();
+  }
+  for (u32 op = 0; op < 5u; ++op) {
+    const V4StoreOp store_op = static_cast<V4StoreOp>(op);
+    const bool unaligned_word =
+        store_op == V4StoreOp::Swl || store_op == V4StoreOp::Swr;
+    code.align(16);
+    stubs.device_store[op] = code.getCurr();
+    code.mov(state(offsetof(V4NativeState, store_hits_code)), code.ecx);
+    if (unaligned_word) {
+      // Read-modify-write against the device bus.
+      code.mov(code.edx, state(offsetof(V4NativeState, store_phys)));
+      emit_stub_cycle_arg(code.r8d);
+      emit_v5_bus_call(code, reinterpret_cast<size_t>(&v4_bus_read32));
+      code.mov(code.r8d, state(offsetof(V4NativeState, store_value)));
+      code.mov(code.r9d, state(offsetof(V4NativeState, store_byte_offset)));
+      emit_v5_unaligned_store_merge(code, store_op);
+      code.mov(code.r8d, code.eax);
+    } else {
+      code.mov(code.r8d, state(offsetof(V4NativeState, store_value)));
+    }
+    code.mov(code.edx, state(offsetof(V4NativeState, store_phys)));
+    emit_stub_cycle_arg(code.r9d);
+    size_t fn = reinterpret_cast<size_t>(&v4_bus_write32);
+    if (store_op == V4StoreOp::Sb) {
+      fn = reinterpret_cast<size_t>(&v4_bus_write8);
+    } else if (store_op == V4StoreOp::Sh) {
+      fn = reinterpret_cast<size_t>(&v4_bus_write16);
+    }
+    emit_v5_bus_call(code, fn);
+    code.mov(state(offsetof(V4NativeState, host_timing_boundary)), 1u);
+    emit_stub_retire(false);
+    code.add(code.ebx, 2u);
+    emit_stub_exit_after();
+  }
+  for (u32 variant = 0; variant < 2u; ++variant) {
+    // Isolated-cache store (SR.IsC): invalidates the I-cache line instead of
+    // writing memory. Variant 1 is SWL/SWR, which still reads the word.
+    code.align(16);
+    stubs.isolated_store[variant] = code.getCurr();
+    code.mov(state(offsetof(V4NativeState, store_hits_code)), code.ecx);
+    code.mov(state(offsetof(V4NativeState, store_phys)), code.edx);
+    emit_v4_isolated_icache_invalidate(code);
+    if (variant == 1u) {
+      Label no_ram_penalty;
+      code.mov(code.edx, state(offsetof(V4NativeState, store_phys)));
+      emit_stub_cycle_arg(code.r8d);
+      emit_v5_bus_call(code, reinterpret_cast<size_t>(&v4_bus_read32));
+      code.mov(code.edx, state(offsetof(V4NativeState, store_phys)));
+      code.cmp(code.edx, state(offsetof(V4NativeState, mapped_main_ram_size)));
+      code.jae(no_ram_penalty);
+      code.add(code.ebx, 4u);
+      code.L(no_ram_penalty);
+    }
+    code.add(code.ebx, 2u);
+    emit_stub_retire(false);
+    emit_stub_exit_after();
+  }
+
+  // In-block I-cache line check slow path, called from a block (r14) when a
+  // later line's generation changed:
+  //   ECX = first block instruction in the line | word count << 8 |
+  //         generation slot << 12 | refill allowed << 16 |
+  //         first-fetch tracked << 17 | first word within the line << 18 |
+  //         I-cache index << 20 (slot 0 = line 0: V4Block::icache_generation)
+  //   EDX = the line's physical tag.
+  // Resident with this tag: compare the cached words against guest_bits.
+  // Otherwise (refill allowed) compare memory and perform the architectural
+  // refill exactly like the dispatcher. Returns ZF=1 on success (generation
+  // slot updated), ZF=0 with no side effect when the block is stale. Keeps
+  // every register but RAX/RCX/RDX/flags.
+  {
+    code.align(16);
+    stubs.line_check = code.getCurr();
+    Label not_resident, compare_words, words_done, success, fail, refill_done;
+    Label generation_ok, ram_source, source_ready, no_track, tracked_done;
+    code.push(code.r8);
+    code.push(code.r9);
+    code.push(code.rsi);
+    code.inc(state(offsetof(V4NativeState, revalidate_attempts)));
+    code.mov(code.r8d, code.ecx);
+    code.shr(code.r8d, 20);                 // r8 = I-cache index
+    code.mov(code.r9d, code.r8d);
+    code.imul(code.r9d, state(offsetof(V4NativeState, icache_line_stride)));
+    code.mov(code.rax, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, icache_valid))]);
+    code.cmp(code.byte[code.rax + code.r9], 0u);
+    code.je(not_resident);
+    code.mov(code.rax, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, icache_tags))]);
+    code.cmp(code.dword[code.rax + code.r9], code.edx);
+    code.jne(not_resident);
+    code.mov(code.rsi, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, icache_words))]);
+    code.add(code.rsi, code.r9);
+    code.call(compare_words);
+    code.jne(fail);
+    code.jmp(success);
+
+    // RSI = the line's 4 source words. Compares (ECX & 0xFF)... count words
+    // against guest_bits. Clobbers RAX/RDX (EDX saved by the caller paths).
+    code.L(compare_words);
+    {
+      Label loop;
+      code.push(code.rdx);
+      code.push(code.rcx);
+      code.push(code.rsi);
+      code.mov(code.eax, code.ecx);         // word of the line it starts at
+      code.shr(code.eax, 18);
+      code.and_(code.eax, 3u);
+      code.lea(code.rsi, code.ptr[code.rsi + code.rax * 4]);
+      code.movzx(code.eax, code.cl);        // first instruction
+      code.lea(code.rax, code.ptr[code.r14 + code.rax * 4 +
+                                  static_cast<int>(offsetof(V4Block, guest_bits))]);
+      code.shr(code.ecx, 8);
+      code.and_(code.ecx, 7u);              // word count (1..4)
+      code.xor_(code.edx, code.edx);
+      code.L(loop);
+      code.push(code.rcx);
+      code.mov(code.ecx, code.dword[code.rsi + code.rdx * 4]);
+      code.cmp(code.ecx, code.dword[code.rax + code.rdx * 4]);
+      code.pop(code.rcx);
+      code.jne(words_done);
+      code.inc(code.edx);
+      code.cmp(code.edx, code.ecx);
+      code.jb(loop);
+      code.xor_(code.edx, code.edx);        // ZF=1
+      code.L(words_done);
+      code.pop(code.rsi);
+      code.pop(code.rcx);
+      code.pop(code.rdx);
+      code.ret();
+    }
+
+    code.L(not_resident);
+    code.test(code.ecx, 1u << 16);
+    code.jz(fail);
+    code.cmp(code.edx, 0x00800000u);
+    code.jb(ram_source);
+    code.cmp(code.edx, kV4ScratchpadPhys);
+    code.jb(fail);
+    code.cmp(code.edx, 0x1F801000u);
+    code.jae(fail);
+    code.mov(code.rsi, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, scratchpad))]);
+    code.mov(code.eax, code.edx);
+    code.sub(code.eax, kV4ScratchpadPhys);
+    code.add(code.rsi, code.rax);
+    code.jmp(source_ready);
+    code.L(ram_source);
+    code.mov(code.rsi, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, main_ram))]);
+    code.mov(code.eax, code.edx);
+    code.and_(code.eax, 0x001FFFFFu);
+    code.add(code.rsi, code.rax);
+    code.L(source_ready);
+    code.call(compare_words);
+    code.jne(fail);
+    // Refill: tag, valid, the four words, generation, 4 fetch cycles.
+    code.mov(code.rax, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, icache_tags))]);
+    code.mov(code.dword[code.rax + code.r9], code.edx);
+    code.mov(code.rax, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, icache_valid))]);
+    code.mov(code.byte[code.rax + code.r9], 1u);
+    code.mov(code.rax, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, icache_words))]);
+    code.add(code.rax, code.r9);
+    for (int w = 0; w < 4; ++w) {
+      code.mov(code.edx, code.dword[code.rsi + w * 4]);
+      code.mov(code.dword[code.rax + w * 4], code.edx);
+    }
+    code.inc(code.dword[code.r15 + code.r8 * 4]);
+    code.jnz(generation_ok);
+    code.mov(code.dword[code.r15 + code.r8 * 4], 1u);
+    code.L(generation_ok);
+    code.add(code.ebx, 4u);
+    code.inc(state(offsetof(V4NativeState, icache_refills)));
+    code.test(code.ecx, 1u << 17);
+    code.jz(refill_done);
+    code.mov(state(offsetof(V4NativeState, current_block_refill_cycles)), 4u);
+    code.L(refill_done);
+    code.jmp(tracked_done);
+
+    code.L(success);
+    code.test(code.ecx, 1u << 17);
+    code.jz(tracked_done);
+    code.mov(state(offsetof(V4NativeState, current_block_refill_cycles)), 0u);
+    code.L(tracked_done);
+    // Record the line's current generation in the block's slot; slot 0 is
+    // line 0, whose generation lives in V4Block::icache_generation.
+    {
+      Label later_line, recorded;
+      code.mov(code.eax, code.dword[code.r15 + code.r8 * 4]);
+      code.mov(code.edx, code.ecx);
+      code.shr(code.edx, 12);
+      code.and_(code.edx, 15u);
+      code.jnz(later_line);
+      code.mov(code.dword[
+          code.r14 + static_cast<int>(offsetof(V4Block, icache_generation))],
+          code.eax);
+      code.jmp(recorded);
+      code.L(later_line);
+      code.mov(code.dword[code.r14 + code.rdx * 4 +
+                          static_cast<int>(offsetof(V4Block, v5_line_generations))],
+               code.eax);
+      code.L(recorded);
+    }
+    code.inc(state(offsetof(V4NativeState, revalidate_successes)));
+    code.pop(code.rsi);
+    code.pop(code.r9);
+    code.pop(code.r8);
+    code.xor_(code.eax, code.eax);          // ZF=1
+    code.ret();
+
+    code.L(fail);
+    code.pop(code.rsi);
+    code.pop(code.r9);
+    code.pop(code.r8);
+    code.or_(code.eax, 1u);                 // ZF=0
+    code.ret();
+  }
+  code.ready();
+  return arena.commit_emit(buffer, code.getSize());
+}
+
+V4NativeFn compile_v5_block(V4CodeArena &arena, const V5BlockPlan &plan,
+                            const V4LinkTargets &links,
+                            const V4DelayCache *delay_cache, u32 cache_epoch,
+                            const V5Stubs &stubs, const void *linked_entry,
+                            void *&linked_prologue, u32 &code_size) {
+  using namespace Xbyak;
+  const u32 count = plan.count;
+  const size_t reservation = 4096u + static_cast<size_t>(count) * 1536u;
+  void *buffer = arena.begin_emit(reservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator &code = v4_generator(buffer, reservation);
+  code.setDefaultJmpNEAR(true);
+
+  // Xbyak labels allocate in hash maps per definition and forward jump,
+  // which dominated compile time. V5 labels are indices into label_offsets;
+  // every jump is a rel32 patched once the whole block has been emitted.
+  constexpr u32 kNoLabel = 0xFFFFFFFFu;
+  constexpr u8 kB = 0x2u, kAE = 0x3u, kE = 0x4u, kNE = 0x5u;
+  std::vector<s32> label_offsets;
+  label_offsets.reserve(64u);
+  std::vector<std::pair<u32, u32>> fixups; // (label, rel32 field offset)
+  fixups.reserve(96u);
+  const auto new_label = [&]() -> u32 {
+    label_offsets.push_back(-1);
+    return static_cast<u32>(label_offsets.size() - 1u);
+  };
+  const auto bind = [&](u32 label) {
+    label_offsets[label] = static_cast<s32>(code.getSize());
+  };
+  const auto jcc = [&](u8 condition, u32 label) {
+    code.db(0x0Fu);
+    code.db(0x80u | condition);
+    fixups.emplace_back(label, static_cast<u32>(code.getSize()));
+    code.dd(0u);
+  };
+  const auto jmp_label = [&](u32 label) {
+    code.db(0xE9u);
+    fixups.emplace_back(label, static_cast<u32>(code.getSize()));
+    code.dd(0u);
+  };
+
+  std::vector<std::function<void()>> cold;
+  // PGXP hooks are compiled in only while PGXP is on; run_slice() drops all
+  // translations when the setting changes.
+  const bool pgxp = g_pgxp_enabled;
+
+  // PC of instruction `index` (a fused loop is not sequential); `count` is
+  // the sequential successor of the last instruction.
+  const auto pc_of = [&](u32 index) {
+    return index < count ? plan.insts[index].pc
+                         : plan.insts[count - 1u].pc + 4u;
+  };
+  const auto state = [&](size_t offset) {
+    return code.dword[code.r11 + static_cast<int>(offset)];
+  };
+
+  // emit_retire_incoming_load() / emit_finish_load_value() with V5 labels.
+  // GPR targeted by the delayed load that the previous instruction of this
+  // block scheduled (0 when unknown, e.g. at entry). The state in memory is
+  // still written at the load, so exits and device paths need no fixups.
+  u8 known_pending = 0u;
+  const auto v5_retire = [&](u8 cancel_reg) {
+    if (known_pending != 0u) {
+      if (cancel_reg != known_pending) {
+        code.mov(code.eax, state(offsetof(V4NativeState, pending_load_value)));
+        code.mov(code.dword[code.r10 + static_cast<int>(known_pending) * 4],
+                 code.eax);
+      }
+      code.mov(state(offsetof(V4NativeState, pending_load_reg)), 0u);
+      code.mov(state(offsetof(V4NativeState, pending_load_value)), 0u);
+      known_pending = 0u;
+      return;
+    }
+    const u32 clear = new_label();
+    const u32 done = new_label();
+    code.mov(code.eax, state(offsetof(V4NativeState, pending_load_reg)));
+    code.test(code.eax, code.eax);
+    jcc(kE, done);
+    if (cancel_reg != 0u) {
+      code.cmp(code.eax, static_cast<u32>(cancel_reg));
+      jcc(kE, clear);
+    }
+    code.mov(code.ecx, state(offsetof(V4NativeState, pending_load_value)));
+    code.mov(code.dword[code.r10 + code.rax * 4], code.ecx);
+    bind(clear);
+    code.mov(state(offsetof(V4NativeState, pending_load_reg)), 0u);
+    code.mov(state(offsetof(V4NativeState, pending_load_value)), 0u);
+    bind(done);
+  };
+  const auto v5_finish_load = [&](const V4DecodedLoad &load, bool retire) {
+    if (retire) {
+      v5_retire(load.rt);
+    }
+    if (load.rt != 0u) {
+      code.mov(state(offsetof(V4NativeState, pending_load_reg)),
+               static_cast<u32>(load.rt));
+      code.mov(state(offsetof(V4NativeState, pending_load_value)), code.r8d);
+    }
+  };
+
+  V4AluRegisterCache cache{};
+  V4AluConstantState constants{};
+  // Whether a delayed load may be pending at the current instruction. Unknown
+  // at entry; afterwards it is exactly "the previous instruction was a load".
+  bool maybe_pending = true;
+
+  struct BoundaryExit {
+    u32 label = 0xFFFFFFFFu;
+    V4AluRegisterCache cache{};
+  };
+  std::array<BoundaryExit, kV4MaxBlockInstructions + 1u> exits{};
+  const auto exit_at = [&](u32 index) -> u32 {
+    BoundaryExit &exit = exits[index];
+    if (exit.label == kNoLabel) {
+      exit.label = new_label();
+      exit.cache = cache;
+    }
+    return exit.label;
+  };
+
+  // `retired` (>= 1) instructions have completed and ebx holds their cycles.
+  const auto emit_commit_and_return = [&code, &stubs](u32 retired) {
+    code.mov(code.ecx, retired);
+    code.jmp(stubs.exit);
+  };
+
+  // EAX holds the faulting virtual address.
+  // Instructions whose fetch may be a refill charged inside this block entry:
+  // the first instruction and the first of each later checked line. Their
+  // device timestamps and exception anchors exclude that refill, exactly as
+  // for a block's first instruction (current_block_refill_cycles).
+  std::array<bool, kV4MaxBlockInstructions> first_fetch{};
+  first_fetch[0] = true;
+  for (u32 c = 0; c < plan.check_count; ++c) {
+    first_fetch[plan.checks[c].first_instruction] = true;
+  }
+
+  const auto emit_exception = [&code, &stubs, &first_fetch](u32 index,
+                                                           Exception cause) {
+    code.mov(code.ecx, index);
+    code.mov(code.edx, first_fetch[index] ? 1u : 0u);
+    code.jmp(cause == Exception::AddrLoadErr    ? stubs.address_load_error
+             : cause == Exception::AddrStoreErr ? stubs.address_store_error
+                                                 : stubs.overflow);
+  };
+
+  // Direct links jump straight to the dispatcher's linked entry (rel32: the
+  // arena is one 32 MiB mapping).
+  const auto emit_link_selected = [&code, &links]() {
+    emit_v4_selected_link(code, links);
+  };
+  const auto emit_link = [&](V4DispatchEntry *cell) {
+    if (links.entry == nullptr || cell == nullptr) {
+      emit_v4_block_return(code);
+      return;
+    }
+    code.mov(code.r14, reinterpret_cast<size_t>(cell));
+    emit_link_selected();
+  };
+
+  // Start-of-instruction cycle for a bus call. The first instruction excludes
+  // a fetch refill charged before the block started (see V4NativeState).
+  const auto emit_cycle_arg = [&code, &state, &first_fetch](u32 index,
+                                                            bool write) {
+    // Win64 argument positions on every host; emit_v5_bus_call remaps.
+    const Reg32 &arg = write ? code.r9d : code.r8d;
+    code.mov(arg, code.ebx);
+    if (first_fetch[index]) {
+      code.sub(arg, state(offsetof(V4NativeState, current_block_refill_cycles)));
+    }
+  };
+
+  // Loads and stores. In a delay slot (`yield` set) every path that is not a
+  // plain RAM/scratchpad access (or the timer/IRQ bridge) jumps to `yield`
+  // before any side effect, leaving the delay instruction pending.
+  const auto emit_load = [&](u32 i, u32 yield) {
+    const V4DecodedLoad load = plan.insts[i].load;
+    const bool retire = maybe_pending;
+    const std::optional<u32> constant_address =
+        constants.valid[load.rs]
+            ? std::optional<u32>(constants.value[load.rs] +
+                                 static_cast<u32>(load.simm))
+            : std::nullopt;
+    const u32 unaligned = yield != kNoLabel ? yield : new_label();
+    const u32 device = yield != kNoLabel ? yield : new_label();
+    const u32 hot = new_label();
+    const u32 loaded = new_label();
+    const u32 not_ram = new_label();
+
+    if (constant_address) {
+      code.mov(code.eax, *constant_address);
+    } else {
+      emit_read_guest(code, code.eax, load.rs);
+      code.add(code.eax, static_cast<u32>(load.simm));
+    }
+    const u32 align_mask =
+        (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu)
+            ? 1u
+            : (load.op == V4LoadOp::Lw ? 3u : 0u);
+    if (align_mask != 0u) {
+      if (constant_address) {
+        if ((*constant_address & align_mask) != 0u) {
+          jmp_label(unaligned);
+        }
+      } else {
+        code.test(code.eax, align_mask);
+        jcc(kNE, unaligned);
+      }
+    }
+    const u32 constant_phys =
+        constant_address ? (*constant_address & 0x1FFFFFFFu) : 0u;
+    if (constant_address) {
+      code.mov(code.edx, constant_phys);
+    } else {
+      code.mov(code.edx, code.eax);
+      code.and_(code.edx, 0x1FFFFFFFu);
+    }
+    const bool unaligned_word =
+        load.op == V4LoadOp::Lwl || load.op == V4LoadOp::Lwr;
+    if (unaligned_word) {
+      code.mov(code.ecx, code.edx);
+      code.and_(code.ecx, 3u);
+      code.mov(state(offsetof(V4NativeState, load_byte_offset)), code.ecx);
+      code.and_(code.edx, ~3u);
+    }
+    const bool is_half = load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu;
+    const auto emit_memory_read = [&]() {
+      switch (load.op) {
+      case V4LoadOp::Lb:
+        code.movsx(code.r8d, code.byte[code.rcx + code.rdx]);
+        break;
+      case V4LoadOp::Lh:
+        code.movsx(code.r8d, code.word[code.rcx + code.rdx]);
+        break;
+      case V4LoadOp::Lwl:
+      case V4LoadOp::Lw:
+      case V4LoadOp::Lwr:
+        code.mov(code.r8d, code.dword[code.rcx + code.rdx]);
+        break;
+      case V4LoadOp::Lbu:
+        code.movzx(code.r8d, code.byte[code.rcx + code.rdx]);
+        break;
+      case V4LoadOp::Lhu:
+        code.movzx(code.r8d, code.word[code.rcx + code.rdx]);
+        break;
+      }
+    };
+    const auto emit_ram = [&](bool known) {
+      if (!known) {
+        code.and_(code.edx, psx::RAM_SIZE - 1u);
+      }
+      code.mov(code.rcx, code.ptr[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, main_ram))]);
+      emit_memory_read();
+      if (pgxp && load.op == V4LoadOp::Lw) {
+        emit_v4_pgxp_word(code, reinterpret_cast<size_t>(&v4_pgxp_lw),
+                          load.rt, 0u);
+      }
+      code.add(code.ebx, 4u);
+    };
+    const auto emit_scratch = [&](bool known) {
+      if (known) {
+        code.mov(code.edx, constant_phys - kV4ScratchpadPhys);
+      } else {
+        code.sub(code.edx, kV4ScratchpadPhys);
+      }
+      code.mov(code.rcx, code.ptr[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, scratchpad))]);
+      emit_memory_read();
+      if (pgxp && load.op == V4LoadOp::Lw) {
+        emit_v4_pgxp_word(code, reinterpret_cast<size_t>(&v4_pgxp_lw),
+                          load.rt, kV4ScratchpadPhys);
+      }
+    };
+    // PAD/SIO 16-bit reads stay resident while a later instruction of this
+    // block can take the boundary they may request (see v5_pad_read16).
+    const bool pad_hot = is_half && yield == kNoLabel && i + 1u < count;
+    const u32 pad = new_label();
+    const auto pad_range = [](u32 phys) {
+      return phys >= 0x1F801040u && phys < 0x1F801050u;
+    };
+    const auto hot_range = [](u32 phys) {
+      return (phys >= 0x1F801070u && phys < 0x1F801078u) ||
+             (phys >= 0x1F801100u && phys < 0x1F801130u);
+    };
+
+    if (constant_address && constant_phys < psx::RAM_SIZE) {
+      emit_ram(true);
+    } else if (constant_address && constant_phys >= kV4ScratchpadPhys &&
+               constant_phys < 0x1F801000u) {
+      emit_scratch(true);
+    } else if (constant_address) {
+      jmp_label(is_half && hot_range(constant_phys) ? hot
+                : pad_hot && pad_range(constant_phys) ? pad
+                                                       : device);
+    } else {
+      code.cmp(code.edx, state(offsetof(V4NativeState, mapped_main_ram_size)));
+      jcc(kAE, not_ram);
+      emit_ram(false);
+      jmp_label(loaded);
+      bind(not_ram);
+      code.cmp(code.edx, kV4ScratchpadPhys);
+      jcc(kB, device);
+      code.cmp(code.edx, 0x1F801000u);
+      if (is_half) {
+        const u32 not_scratch = new_label();
+        jcc(kAE, not_scratch);
+        emit_scratch(false);
+        jmp_label(loaded);
+        bind(not_scratch);
+        if (pad_hot) {
+          code.cmp(code.edx, 0x1F801040u);
+          jcc(kB, device);
+          code.cmp(code.edx, 0x1F801050u);
+          jcc(kB, pad);
+        }
+        code.cmp(code.edx, 0x1F801070u);
+        jcc(kB, device);
+        code.cmp(code.edx, 0x1F801078u);
+        jcc(kB, hot);
+        code.cmp(code.edx, 0x1F801100u);
+        jcc(kB, device);
+        code.cmp(code.edx, 0x1F801130u);
+        jcc(kB, hot);
+        jmp_label(device);
+      } else {
+        jcc(kAE, device);
+        emit_scratch(false);
+      }
+    }
+    bind(loaded);
+    if (unaligned_word) {
+      emit_v5_unaligned_load_merge(code, load);
+    }
+    v5_finish_load(load, retire);
+    code.add(code.ebx, 2u);
+
+    cold.push_back([&, unaligned, hot, pad, pad_hot, loaded,
+                    device, load, i, retire, is_half, yield]() {
+      if (is_half) {
+        bind(hot);
+        // Timer/IRQ reads go through the narrow bridge and keep the block
+        // resident, like the V4 fragments.
+        code.mov(state(offsetof(V4NativeState, store_phys)), code.edx);
+        emit_cycle_arg(i, false);
+        emit_v5_bus_call(code, reinterpret_cast<size_t>(&v4_hot_mmio_read16));
+        const u32 hot_declined = new_label();
+        code.cmp(code.eax, 0x10000u);
+        jcc(kAE, hot_declined);
+        if (load.op == V4LoadOp::Lh) {
+          code.movsx(code.r8d, code.ax);
+        } else {
+          code.mov(code.r8d, code.eax);
+        }
+        jmp_label(loaded);
+        bind(hot_declined);
+        code.mov(code.edx, state(offsetof(V4NativeState, store_phys)));
+        jmp_label(device);
+      }
+      if (pad_hot) {
+        bind(pad);
+        emit_cycle_arg(i, false);
+        emit_v5_bus_call(code, reinterpret_cast<size_t>(&v5_pad_read16));
+        // Wait cycles a device bridge charged are folded now, as the
+        // block-return trampoline would after an exiting access.
+        code.mov(code.rcx, code.ptr[code.r11 + static_cast<int>(offsetof(
+                               V4NativeState, external_cycle_penalty))]);
+        code.add(code.ebx, code.dword[code.rcx]);
+        code.mov(code.dword[code.rcx], 0u);
+        const u32 no_boundary = new_label();
+        code.test(code.eax, 0x20000u);
+        jcc(kE, no_boundary);
+        // The scheduler wants this boundary: the next instruction's
+        // budget check fails (r13d = 0) and its exit restores r13d; the
+        // block-return path then runs the device-boundary hook.
+        code.mov(state(offsetof(V4NativeState, host_timing_boundary)), 1u);
+        code.xor_(code.r13d, code.r13d);
+        bind(no_boundary);
+        if (load.op == V4LoadOp::Lh) {
+          code.movsx(code.r8d, code.ax);
+        } else {
+          code.movzx(code.r8d, code.ax);
+        }
+        jmp_label(loaded);
+      }
+      if (yield != kNoLabel) {
+        return;
+      }
+
+      bind(unaligned);
+      emit_exception(i, Exception::AddrLoadErr);
+
+      bind(device);
+      // A device access is a host scheduling boundary: the shared stub
+      // performs it and ends the block after this instruction.
+      code.mov(code.ecx, i | (static_cast<u32>(load.rt) << 8) |
+                             (retire ? (1u << 16) : 0u) |
+                             (first_fetch[i] ? (1u << 17) : 0u));
+      code.jmp(stubs.device_load[static_cast<u32>(load.op)]);
+    });
+
+    if (load.rt != 0u) {
+      constants.valid[load.rt] = false;
+    }
+    maybe_pending = load.rt != 0u;
+    known_pending = load.rt;
+  };
+
+  const auto emit_store = [&](u32 i, u32 yield) {
+    const V4DecodedStore store = plan.insts[i].store;
+    const bool retire = maybe_pending;
+    const std::optional<u32> constant_address =
+        constants.valid[store.rs]
+            ? std::optional<u32>(constants.value[store.rs] +
+                                 static_cast<u32>(store.simm))
+            : std::nullopt;
+    const u32 unaligned = yield != kNoLabel ? yield : new_label();
+    const u32 device = yield != kNoLabel ? yield : new_label();
+    const u32 isolated = yield != kNoLabel ? yield : new_label();
+    const u32 stored = new_label();
+    const u32 not_ram = new_label();
+    const u32 stop_after_store = new_label();
+    const bool unaligned_word =
+        store.op == V4StoreOp::Swl || store.op == V4StoreOp::Swr;
+    // A delay slot is the block's last instruction; nothing follows to stop.
+    const bool check_code_lines = plan.stop_on_code_store && yield == kNoLabel;
+
+    // Operands are captured before the incoming delayed load retires.
+    if (constant_address) {
+      code.mov(code.eax, *constant_address);
+    } else {
+      emit_read_guest(code, code.eax, store.rs);
+      code.add(code.eax, static_cast<u32>(store.simm));
+    }
+    emit_read_guest(code, code.r8d, store.rt);
+    const u32 align_mask =
+        store.op == V4StoreOp::Sh ? 1u : (store.op == V4StoreOp::Sw ? 3u : 0u);
+    if (align_mask != 0u) {
+      if (constant_address) {
+        if ((*constant_address & align_mask) != 0u) {
+          jmp_label(unaligned);
+        }
+      } else {
+        code.test(code.eax, align_mask);
+        jcc(kNE, unaligned);
+      }
+    }
+    const u32 constant_phys =
+        constant_address ? (*constant_address & 0x1FFFFFFFu) : 0u;
+    if (constant_address) {
+      code.mov(code.edx, constant_phys);
+    } else {
+      code.mov(code.edx, code.eax);
+      code.and_(code.edx, 0x1FFFFFFFu);
+    }
+    if (unaligned_word) {
+      code.mov(code.ecx, code.edx);
+      code.and_(code.ecx, 3u);
+      code.mov(state(offsetof(V4NativeState, store_byte_offset)), code.ecx);
+      code.and_(code.edx, ~3u);
+    }
+    // Isolated-cache stores hit the I-cache, not memory.
+    code.test(state(offsetof(V4NativeState, cop0_sr)), 1u << 16);
+    jcc(kNE, isolated);
+
+    const auto emit_code_line_check = [&](bool scratch) {
+      if (!check_code_lines) {
+        return;
+      }
+      // Same translated-line bitmap key as the V4 store guard.
+      code.mov(code.r9d, code.edx);
+      if (scratch) {
+        code.add(code.r9d, kV4ScratchpadPhys);
+      }
+      code.shr(code.r9d, 4u);
+      code.mov(code.ecx, code.r9d);
+      code.shr(code.r9d, 6u);
+      code.and_(code.ecx, 63u);
+      code.mov(code.rax, code.ptr[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, code_line_bits))]);
+      const u32 no_code_line = new_label();
+      code.test(code.rax, code.rax);
+      jcc(kE, no_code_line);
+      code.mov(code.rax, code.qword[code.rax + code.r9 * 8]);
+      code.shr(code.rax, code.cl);
+      code.test(code.al, 1u);
+      jcc(kNE, stop_after_store);
+      bind(no_code_line);
+    };
+    const auto emit_write = [&]() {
+      switch (store.op) {
+      case V4StoreOp::Sb:
+        code.mov(code.byte[code.rcx + code.rdx], code.r8b);
+        break;
+      case V4StoreOp::Sh:
+        code.mov(code.word[code.rcx + code.rdx], code.r8w);
+        break;
+      case V4StoreOp::Sw:
+        code.mov(code.dword[code.rcx + code.rdx], code.r8d);
+        break;
+      case V4StoreOp::Swl:
+      case V4StoreOp::Swr:
+        code.mov(code.eax, code.dword[code.rcx + code.rdx]);
+        code.mov(code.r9d, state(offsetof(V4NativeState, store_byte_offset)));
+        emit_v5_unaligned_store_merge(code, store.op);
+        code.mov(code.dword[code.rcx + code.rdx], code.eax);
+        break;
+      }
+    };
+    const auto emit_ram = [&](bool known) {
+      if (!known) {
+        code.and_(code.edx, psx::RAM_SIZE - 1u);
+      }
+      code.mov(code.rcx, code.ptr[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, main_ram))]);
+      emit_write();
+      if (pgxp && store.op == V4StoreOp::Sw) {
+        emit_v4_pgxp_word(code, reinterpret_cast<size_t>(&v4_pgxp_sw),
+                          store.rt, 0u);
+      }
+      // RAM write: 2 issue cycles + 1; SWL/SWR read-modify-write + 5.
+      code.add(code.ebx, unaligned_word ? 7u : 3u);
+      emit_code_line_check(false);
+    };
+    const auto emit_scratch = [&](bool known) {
+      if (known) {
+        code.mov(code.edx, constant_phys - kV4ScratchpadPhys);
+      } else {
+        code.sub(code.edx, kV4ScratchpadPhys);
+      }
+      code.mov(code.rcx, code.ptr[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, scratchpad))]);
+      emit_write();
+      if (pgxp && store.op == V4StoreOp::Sw) {
+        emit_v4_pgxp_word(code, reinterpret_cast<size_t>(&v4_pgxp_sw),
+                          store.rt, kV4ScratchpadPhys);
+      }
+      code.add(code.ebx, 2u);
+      emit_code_line_check(true);
+    };
+
+    if (constant_address && constant_phys < psx::RAM_SIZE) {
+      emit_ram(true);
+    } else if (constant_address && constant_phys >= kV4ScratchpadPhys &&
+               constant_phys < 0x1F801000u) {
+      emit_scratch(true);
+    } else if (constant_address) {
+      jmp_label(device);
+    } else {
+      code.cmp(code.edx, state(offsetof(V4NativeState, mapped_main_ram_size)));
+      jcc(kAE, not_ram);
+      emit_ram(false);
+      jmp_label(stored);
+      bind(not_ram);
+      code.cmp(code.edx, kV4ScratchpadPhys);
+      jcc(kB, device);
+      code.cmp(code.edx, 0x1F801000u);
+      jcc(kAE, device);
+      emit_scratch(false);
+    }
+    bind(stored);
+    const u8 known_at_store = known_pending;
+    if (retire) {
+      v5_retire(0u);
+    }
+
+    if (yield == kNoLabel) {
+      cold.push_back([&, unaligned, isolated,
+                      device, stop_after_store,
+                      store, i, retire, unaligned_word, check_code_lines,
+                      known_at_store]() {
+        bind(unaligned);
+        emit_exception(i, Exception::AddrStoreErr);
+
+        if (check_code_lines) {
+          bind(stop_after_store);
+          if (retire) {
+            known_pending = known_at_store;
+            v5_retire(0u);
+          }
+          emit_commit_and_return(i + 1u);
+        }
+
+        const u32 packed = i | (retire ? (1u << 16) : 0u) |
+                           (first_fetch[i] ? (1u << 17) : 0u);
+        bind(isolated);
+        // EDX = the (aligned) physical address.
+        code.mov(code.ecx, packed);
+        code.jmp(stubs.isolated_store[unaligned_word ? 1u : 0u]);
+
+        bind(device);
+        code.mov(state(offsetof(V4NativeState, store_phys)), code.edx);
+        code.mov(state(offsetof(V4NativeState, store_value)), code.r8d);
+        code.mov(code.ecx, packed);
+        code.jmp(stubs.device_store[static_cast<u32>(store.op)]);
+      });
+    }
+    maybe_pending = false;
+  };
+
+  // COP2: GTE register moves and commands use the narrow GTE bridge; the CPU
+  // side (load delay, scoreboard stalls, cycles) is generated here exactly as
+  // in compile_v4_cop2. LWC2/SWC2 take RAM/scratchpad fast paths; anything
+  // else leaves before the instruction, like the V4 fragment's bail.
+  const auto emit_gte_call = [&](size_t fn, u32 reg) {
+    // fn(Gte*, reg[, R8D]) keeping the resident bases.
+    code.push(code.r10);
+    code.push(code.r11);
+#if defined(_WIN32)
+    code.sub(code.rsp, 32);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.edx, reg);
+#else
+    code.mov(code.edx, code.r8d);
+    code.mov(code.rdi, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.esi, reg);
+#endif
+    code.mov(code.rax, fn);
+    code.call(code.rax);
+#if defined(_WIN32)
+    code.add(code.rsp, 32);
+#endif
+    code.pop(code.r11);
+    code.pop(code.r10);
+  };
+  const auto emit_gte_stall = [&](bool command) {
+    // Stall until the GTE result (or, for a command, result and input) is
+    // ready, relative to this instruction's issue cycle + 2.
+    const u32 ready = new_label();
+    code.mov(code.r8, code.qword[code.r11 + static_cast<int>(offsetof(
+                                     V4NativeState, gte_result_ready_cycle))]);
+    if (command) {
+      const u32 selected = new_label();
+      code.mov(code.rax, code.qword[code.r11 + static_cast<int>(offsetof(
+                                        V4NativeState, gte_input_ready_cycle))]);
+      code.cmp(code.r8, code.rax);
+      jcc(kAE, selected);
+      code.mov(code.r8, code.rax);
+      bind(selected);
+    }
+    code.mov(code.rcx, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rcx, code.rbx);
+    code.add(code.rcx, 2u);
+    code.cmp(code.r8, code.rcx);
+    jcc(0x6u /* below or equal */, ready);
+    code.sub(code.r8, code.rcx);
+    code.add(code.ebx, code.r8d);
+    bind(ready);
+  };
+  const auto emit_gte_ready = [&](size_t offset, u32 cycles) {
+    code.mov(code.rax, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rax, code.rbx);
+    code.add(code.rax, cycles);
+    code.mov(code.qword[code.r11 + static_cast<int>(offset)], code.rax);
+  };
+  const auto emit_set_pending = [&](u8 rt) {
+    if (rt != 0u) {
+      code.mov(state(offsetof(V4NativeState, pending_load_reg)),
+               static_cast<u32>(rt));
+      code.mov(state(offsetof(V4NativeState, pending_load_value)), code.r8d);
+    }
+  };
+  const auto emit_cop2 = [&](u32 i) {
+    const V4DecodedCop2 &op = plan.insts[i].cop2;
+    switch (op.op) {
+    case V4Cop2Op::Mfc2:
+    case V4Cop2Op::Cfc2: {
+      const bool data = op.op == V4Cop2Op::Mfc2;
+      if (data ? v4_gte_data_reg_reads_result(op.rd) : op.rd == 31u) {
+        emit_gte_stall(false);
+      }
+      emit_gte_call(data ? reinterpret_cast<size_t>(&v4_gte_read_data)
+                         : reinterpret_cast<size_t>(&v4_gte_read_ctrl),
+                    op.rd);
+      code.mov(code.r8d, code.eax);
+      if (data && pgxp) {
+        emit_v4_pgxp_move(code, reinterpret_cast<size_t>(&v4_pgxp_mfc2),
+                          op.rd, op.rt);
+      }
+      if (maybe_pending) {
+        v5_retire(op.rt);
+      }
+      emit_set_pending(op.rt);
+      if (op.rt != 0u) {
+        constants.valid[op.rt] = false;
+      }
+      maybe_pending = op.rt != 0u;
+      known_pending = op.rt;
+      code.add(code.ebx, 2u);
+      return;
+    }
+    case V4Cop2Op::Mtc2:
+    case V4Cop2Op::Ctc2:
+      emit_read_guest(code, code.r8d, op.rt);
+      if (maybe_pending) {
+        v5_retire(0u);
+        maybe_pending = false;
+      }
+      emit_gte_call(op.op == V4Cop2Op::Mtc2
+                        ? reinterpret_cast<size_t>(&v4_gte_write_data)
+                        : reinterpret_cast<size_t>(&v4_gte_write_ctrl),
+                    op.rd);
+      if (op.op == V4Cop2Op::Mtc2 && pgxp) {
+        emit_v4_pgxp_move(code, reinterpret_cast<size_t>(&v4_pgxp_mtc2),
+                          op.rd, op.rt);
+      }
+      emit_gte_ready(offsetof(V4NativeState, gte_input_ready_cycle), 6u);
+      code.add(code.ebx, 2u);
+      return;
+    case V4Cop2Op::Command:
+      emit_gte_stall(true);
+      if (maybe_pending) {
+        v5_retire(0u);
+        maybe_pending = false;
+      }
+      emit_gte_call(reinterpret_cast<size_t>(&v4_gte_execute), op.bits);
+      emit_gte_ready(offsetof(V4NativeState, gte_result_ready_cycle),
+                     v4_gte_command_cycles(op.bits));
+      code.add(code.ebx, 2u);
+      return;
+    case V4Cop2Op::Lwc2:
+    case V4Cop2Op::Swc2:
+      break;
+    }
+
+    // LWC2/SWC2. The block's dispatcher gate already requires the memory
+    // fast path (has_memory).
+    const bool store = op.op == V4Cop2Op::Swc2;
+    const u32 unaligned = new_label();
+    const u32 leave = new_label();
+    const u32 ram = new_label();
+    emit_read_guest(code, code.eax, op.rs);
+    code.add(code.eax, static_cast<u32>(op.simm));
+    code.test(code.eax, 3u);
+    jcc(kNE, unaligned);
+    if (store) {
+      // Isolated-cache SWC2 is left to the V4 fragment, as before.
+      code.test(state(offsetof(V4NativeState, cop0_sr)), 1u << 16);
+      jcc(kNE, leave);
+    }
+    code.mov(code.edx, code.eax);
+    code.and_(code.edx, 0x1FFFFFFFu);
+    code.cmp(code.edx, state(offsetof(V4NativeState, mapped_main_ram_size)));
+    jcc(kB, ram);
+    code.cmp(code.edx, kV4ScratchpadPhys);
+    jcc(kB, leave);
+    code.cmp(code.edx, 0x1F801000u);
+    jcc(kAE, leave);
+    // store_phys = region-normalized physical address (the PGXP hooks read
+    // it); store_value = the data-bus penalty (RAM only).
+    code.mov(state(offsetof(V4NativeState, store_value)), 0u);
+    const u32 region_ready = new_label();
+    jmp_label(region_ready);
+    bind(ram);
+    code.and_(code.edx, psx::RAM_SIZE - 1u);
+    code.mov(state(offsetof(V4NativeState, store_value)), store ? 1u : 4u);
+    bind(region_ready);
+    code.mov(state(offsetof(V4NativeState, store_phys)), code.edx);
+    if (maybe_pending) {
+      v5_retire(0u);
+      maybe_pending = false;
+    }
+    const auto emit_region_base = [&]() {
+      // RCX = host base, EDX = offset, from store_phys.
+      const u32 scratch = new_label();
+      const u32 based = new_label();
+      code.mov(code.edx, state(offsetof(V4NativeState, store_phys)));
+      code.cmp(code.edx, kV4ScratchpadPhys);
+      jcc(kAE, scratch);
+      code.mov(code.rcx, code.ptr[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, main_ram))]);
+      jmp_label(based);
+      bind(scratch);
+      code.sub(code.edx, kV4ScratchpadPhys);
+      code.mov(code.rcx, code.ptr[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, scratchpad))]);
+      bind(based);
+    };
+    if (!store) {
+      emit_region_base();
+      code.mov(code.r8d, code.dword[code.rcx + code.rdx]);
+      // Input ready six cycles after the issue cycle plus bus penalty.
+      code.mov(code.ecx, state(offsetof(V4NativeState, store_value)));
+      code.mov(code.rax, code.qword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+      code.add(code.rax, code.rbx);
+      code.add(code.rax, code.rcx);
+      code.add(code.rax, 6u);
+      code.mov(code.qword[code.r11 + static_cast<int>(offsetof(
+                              V4NativeState, gte_input_ready_cycle))],
+               code.rax);
+      code.lea(code.ebx, code.ptr[code.rbx + code.rcx + 2]);
+      emit_gte_call(reinterpret_cast<size_t>(&v4_gte_write_data), op.rt);
+      if (pgxp) {
+        emit_v4_pgxp_swc2(code, op.rt, reinterpret_cast<size_t>(&v4_pgxp_lwc2));
+      }
+    } else {
+      if (v4_gte_data_reg_reads_result(op.rt)) {
+        emit_gte_stall(false);
+      }
+      emit_gte_call(reinterpret_cast<size_t>(&v4_gte_read_data), op.rt);
+      emit_region_base();
+      code.mov(code.dword[code.rcx + code.rdx], code.eax);
+      code.add(code.ebx, state(offsetof(V4NativeState, store_value)));
+      code.add(code.ebx, 2u);
+      // A RAM store into a translated code line advances that page's JIT
+      // generation, as the V4 SWC2 fragment does.
+      const u32 no_code = new_label();
+      code.mov(code.eax, state(offsetof(V4NativeState, store_phys)));
+      code.cmp(code.eax, psx::RAM_SIZE);
+      jcc(kAE, no_code);
+      code.mov(code.ecx, code.eax);
+      code.shr(code.ecx, 4u);
+      code.mov(code.edx, code.ecx);
+      code.shr(code.edx, 6u);
+      code.and_(code.ecx, 63u);
+      code.mov(code.r8, code.ptr[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, code_line_bits))]);
+      code.test(code.r8, code.r8);
+      jcc(kE, no_code);
+      code.mov(code.r8, code.qword[code.r8 + code.rdx * 8]);
+      code.shr(code.r8, code.cl);
+      code.test(code.r8b, 1u);
+      jcc(kE, no_code);
+      {
+        const u32 generation_ok = new_label();
+        code.shr(code.eax, kV4PhysPageShift);
+        code.mov(code.rdx, code.ptr[code.r11 + static_cast<int>(offsetof(
+                                        V4NativeState, code_page_generations))]);
+        code.inc(code.dword[code.rdx + code.rax * 4]);
+        jcc(kNE, generation_ok);
+        code.mov(code.dword[code.rdx + code.rax * 4], 1u);
+        bind(generation_ok);
+      }
+      if (plan.stop_on_code_store) {
+        // Uncached code observes RAM directly: stop after the store.
+        if (pgxp) {
+          emit_v4_pgxp_swc2(code, op.rt);
+        }
+        code.mov(code.ecx, i + 1u);
+        code.jmp(stubs.exit);
+      }
+      bind(no_code);
+      if (pgxp) {
+        emit_v4_pgxp_swc2(code, op.rt);
+      }
+    }
+    const u32 leave_exit = exit_at(i);
+    cold.push_back([&, unaligned, leave, leave_exit, i, store]() {
+      bind(unaligned);
+      emit_exception(i, store ? Exception::AddrStoreErr
+                              : Exception::AddrLoadErr);
+      bind(leave);
+      // Not a fast-path access: leave before it (this instruction already
+      // flushed the register cache and changed nothing). As the first
+      // instruction that is no progress, exactly like the V4 fragment's bail:
+      // device/isolated LWC2/SWC2 have no native path.
+      // The boundary exit also restores delay-slot state after a superblock
+      // branch.
+      jmp_label(leave_exit);
+    });
+  };
+
+  // HI/LO transfers, MULT/DIV and overflow-trapping ADD/ADDI/SUB. EBX is the
+  // instruction's issue cycle. An overflow in a delay slot (`yield` set)
+  // leaves the slot pending instead of raising the exception here.
+  const auto emit_simple = [&](u32 i, u32 yield) {
+    const V5Instruction &inst = plan.insts[i];
+    if (inst.kind == V5Kind::HiLo) {
+      const u8 written = emit_v4_hilo_body(code, inst.hilo);
+      if (maybe_pending) {
+        v5_retire(written);
+        maybe_pending = false;
+      }
+      if (written != 0u) {
+        constants.valid[written] = false;
+      }
+    } else if (inst.kind == V5Kind::MulDiv) {
+      emit_v4_muldiv_body(code, inst.muldiv);
+      if (maybe_pending) {
+        v5_retire(0u);
+        maybe_pending = false;
+      }
+    } else {
+      const V4DecodedOverflowAlu &op = inst.overflow;
+      emit_read_guest(code, code.eax, op.rs);
+      if (op.op == V4OverflowAluOp::Add) {
+        emit_read_guest(code, code.ecx, op.rt);
+        code.add(code.eax, code.ecx);
+      } else if (op.op == V4OverflowAluOp::Sub) {
+        emit_read_guest(code, code.ecx, op.rt);
+        code.sub(code.eax, code.ecx);
+      } else {
+        code.add(code.eax, static_cast<u32>(op.simm));
+      }
+      const u32 overflow = yield != kNoLabel ? yield : new_label();
+      jcc(0x0u /* overflow */, overflow);
+      const u8 dest = op.op == V4OverflowAluOp::Addi ? op.rt : op.rd;
+      emit_write_guest(code, dest, code.eax);
+      if (maybe_pending) {
+        v5_retire(dest);
+        maybe_pending = false;
+      }
+      if (dest != 0u) {
+        constants.valid[dest] = false;
+      }
+      if (yield == kNoLabel) {
+        cold.push_back([&, overflow, i]() {
+          bind(overflow);
+          emit_exception(i, Exception::Overflow);
+        });
+      }
+    }
+    code.inc(code.ebx);
+  };
+
+  bool has_load = false;
+  bool has_store = false;
+  for (u32 i = 0; i < count; ++i) {
+    has_load = has_load || plan.insts[i].kind == V5Kind::Load ||
+               (plan.insts[i].kind == V5Kind::Cop2Mem &&
+                plan.insts[i].cop2.op == V4Cop2Op::Lwc2);
+    has_store = has_store || plan.insts[i].kind == V5Kind::Store ||
+                (plan.insts[i].kind == V5Kind::Cop2Mem &&
+                 plan.insts[i].cop2.op == V4Cop2Op::Swc2);
+
+  }
+
+  // Dispatcher entry (V4Block::fn): the dispatcher already ran its gates.
+  // Telemetry: one count per dispatcher entry of a block with loads/stores
+  // (direct links skip it).
+  const u32 body_label = new_label();
+  if (has_load) {
+    code.inc(state(offsetof(V4NativeState, memory_entries)));
+  }
+  if (has_store) {
+    code.inc(state(offsetof(V4NativeState, store_entries)));
+  }
+  jmp_label(body_label);
+  const size_t linked_offset = code.getSize();
+
+  // Linked-entry prologue (V4Block::linked_fn, r14 = this block): the
+  // dispatcher's check_block gates with this block's constants. Anything
+  // unusual (stale line 0, budget, tracing) takes the generic linked entry.
+  const u32 linked_slow = new_label();
+  if (has_load || has_store) {
+    code.cmp(state(offsetof(V4NativeState, memory_fastpath_allowed)), 0u);
+    jcc(kE, linked_slow);
+  }
+  code.cmp(code.r12d, count);
+  jcc(kB, linked_slow);
+  code.cmp(code.ebx, code.r13d);
+  jcc(kAE, linked_slow);
+  if (plan.cacheable) {
+    const u32 start_pc = plan.insts[0].pc;
+    const u32 line0_index = (start_pc >> 4u) & 0xFFu;
+    const u32 revalidate_line0 = new_label();
+    const u32 line0_ready = new_label();
+    code.mov(code.eax, code.dword[code.r15 + static_cast<int>(line0_index * 4u)]);
+    code.cmp(code.eax, code.dword[
+        code.r14 + static_cast<int>(offsetof(V4Block, icache_generation))]);
+    jcc(kNE, revalidate_line0);
+    bind(line0_ready);
+    {
+      // Line 0 changed: revalidate (or perform the first fetch's refill)
+      // through the shared stub, as the dispatcher would (a crossline
+      // branch-first block leaves that to the dispatcher).
+      const u32 first_word = (start_pc >> 2u) & 3u;
+      const u32 words = plan.line0_words;
+      const V5Kind first_kind = plan.insts[0].kind;
+      const bool tracks = first_kind == V5Kind::Load ||
+                          first_kind == V5Kind::Store ||
+                          first_kind == V5Kind::Overflow ||
+                          first_kind == V5Kind::Cop2Mem;
+      const bool allow_refill = !plan.second_line;
+      const u32 packed = 0u | (words << 8) | (0u << 12) |
+                         (allow_refill ? (1u << 16) : 0u) |
+                         (tracks ? (1u << 17) : 0u) | (first_word << 18) |
+                         (line0_index << 20);
+      const u32 tag = psx::mask_address(start_pc) & ~0x0Fu;
+      cold.push_back([&, revalidate_line0, line0_ready, packed, tag]() {
+        bind(revalidate_line0);
+        code.mov(code.ecx, packed);
+        code.mov(code.edx, tag);
+        code.call(stubs.line_check);
+        jcc(kNE, linked_slow);
+        jmp_label(line0_ready);
+      });
+    }
+    if (plan.second_line) {
+      code.mov(code.eax, code.dword[
+          code.r15 + static_cast<int>(plan.second_line_index * 4u)]);
+      code.cmp(code.eax, code.dword[
+          code.r14 +
+          static_cast<int>(offsetof(V4Block, second_icache_generation))]);
+      jcc(kNE, linked_slow);
+    }
+  } else {
+    code.mov(code.rax, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, code_page_generations))]);
+    code.mov(code.eax, code.dword[
+        code.rax + static_cast<int>(plan.phys_page * 4u)]);
+    code.cmp(code.eax, code.dword[
+        code.r14 + static_cast<int>(offsetof(V4Block, code_page_generation))]);
+    jcc(kNE, linked_slow);
+  }
+  if (plan.count_entries) {
+    code.inc(code.qword[
+        code.r14 + static_cast<int>(offsetof(V4Block, profile_entries))]);
+  }
+  // Same chain telemetry the generic linked entry keeps.
+  code.inc(state(offsetof(V4NativeState, block_entries)));
+  code.inc(state(offsetof(V4NativeState, direct_links)));
+  const size_t body_offset = code.getSize();
+  cold.push_back([&, linked_slow]() {
+    bind(linked_slow);
+    code.jmp(linked_entry);
+  });
+
+  bind(body_label);
+
+  // I-cache line checks emitted before instruction `index` (the first of a
+  // later line). `fail` leaves without side effects: a boundary exit, or
+  // for a delay slot the branch yield.
+  const auto emit_line_checks = [&](u32 index, u32 fail) {
+    for (u32 c = 0; c < plan.check_count; ++c) {
+      const V5LineCheck check = plan.checks[c];
+      if (check.before_index != index) {
+        continue;
+      }
+      const u32 revalidate = new_label();
+      const u32 resume = new_label();
+      const int generation_offset =
+          static_cast<int>(offsetof(V4Block, v5_line_generations)) +
+          static_cast<int>(check.slot * 4u);
+      // Only loads/stores/overflow ops read the first-fetch refill amount.
+      const V5Kind first_kind = plan.insts[check.first_instruction].kind;
+      const bool tracks_refill = first_kind == V5Kind::Load ||
+                                 first_kind == V5Kind::Store ||
+                                 first_kind == V5Kind::Overflow ||
+                                 first_kind == V5Kind::Cop2Mem;
+      const auto set_refill = [&code, &state, tracks_refill](u32 cycles) {
+        if (tracks_refill) {
+          code.mov(state(offsetof(V4NativeState,
+                                  current_block_refill_cycles)),
+                   cycles);
+        }
+      };
+      code.mov(code.eax, code.dword[
+          code.r15 + static_cast<int>(check.icache_index * 4u)]);
+      code.cmp(code.eax, code.dword[code.r14 + generation_offset]);
+      jcc(kNE, revalidate);
+      set_refill(0u);
+      bind(resume);
+      // Every line is checked where the CPU fetches it (a delay slot's line
+      // right after its branch), so a missing line is refilled natively.
+      // Except a load/store delay slot: it may still yield to the pending
+      // path for a device access, and the block return there drops the
+      // refill's pre-fetch adjustment; that path performs the fetch itself.
+      const bool delay_slot = check.first_instruction != 0u &&
+          plan.insts[check.first_instruction - 1u].kind == V5Kind::Branch;
+      const bool allow_refill =
+          !(delay_slot && (first_kind == V5Kind::Load ||
+                           first_kind == V5Kind::Store));
+      const u32 packed = check.first_instruction | (check.word_count << 8) |
+                         (check.slot << 12) |
+                         (allow_refill ? (1u << 16) : 0u) |
+                         (tracks_refill ? (1u << 17) : 0u) |
+                         (check.first_word << 18) |
+                         (check.icache_index << 20);
+      cold.push_back([&, revalidate, resume, fail, check, packed]() {
+        bind(revalidate);
+        code.mov(code.ecx, packed);
+        code.mov(code.edx, check.tag);
+        code.call(stubs.line_check);
+        jcc(kNE, fail);
+        jmp_label(resume);
+      });
+    }
+  };
+
+  if (count >= 2u) {
+    // An instruction budget smaller than the block (single-step tracing, the
+    // one-instruction retry) runs only the first instruction.
+    const u32 budget_ok = new_label();
+    code.cmp(code.r12d, count);
+    jcc(kAE, budget_ok);
+    code.xor_(code.r13d, code.r13d);
+    bind(budget_ok);
+  }
+  // Self-loop back-edges re-enter here (see the branch tail).
+  const u32 loop_label = new_label();
+  bind(loop_label);
+
+  for (u32 i = 0; i < count; ++i) {
+    const V5Instruction &inst = plan.insts[i];
+    const u32 pc = pc_of(i);
+
+    if (i != 0u) {
+      // A branch only has to start inside the slice; its delay slot is
+      // checked after the branch is charged.
+      code.cmp(code.ebx, code.r13d);
+      jcc(kAE, exit_at(i));
+      emit_line_checks(i, exit_at(i));
+    }
+
+    if (inst.kind == V5Kind::Alu) {
+      const V4DecodedInstruction &alu = inst.alu;
+      const u8 write_reg = v4_alu_write_reg(alu);
+      // A value only stays in a host register while a later instruction of
+      // the same ALU run reads it. Boundary exits spill whatever is cached.
+      V4AluResultPolicy policy = V4AluResultPolicy::Immediate;
+      if (write_reg != 0u) {
+        for (u32 j = i + 1u; j < count &&
+                             plan.insts[j].kind == V5Kind::Alu;
+             ++j) {
+          if (v4_alu_reads_reg(plan.insts[j].alu, write_reg)) {
+            policy = V4AluResultPolicy::Cache;
+            break;
+          }
+          if (v4_alu_write_reg(plan.insts[j].alu) == write_reg) {
+            break;
+          }
+        }
+      }
+      const std::optional<u32> constant =
+          v4_alu_constant_result(alu, constants);
+      if (write_reg != 0u) {
+        constants.valid[write_reg] = constant.has_value();
+        if (constant) {
+          constants.value[write_reg] = *constant;
+        }
+      }
+      if (write_reg != 0u && constant) {
+        emit_v4_alu_commit_result(code, cache, write_reg, policy, nullptr,
+                                  constant);
+      } else {
+        emit_v4_alu_instruction(code, alu, cache, policy);
+      }
+      if (maybe_pending) {
+        v5_retire(write_reg);
+        maybe_pending = false;
+      }
+      code.inc(code.ebx);
+      continue;
+    }
+
+    // Every other instruction reads guest registers from memory.
+    emit_v4_alu_cache_flush(code, cache);
+
+    if (inst.kind == V5Kind::Load) {
+      emit_load(i, kNoLabel);
+      continue;
+    }
+    if (inst.kind == V5Kind::Store) {
+      emit_store(i, kNoLabel);
+      continue;
+    }
+    if (inst.kind == V5Kind::Cop2 || inst.kind == V5Kind::Cop2Mem) {
+      emit_cop2(i);
+      continue;
+    }
+    if (inst.kind != V5Kind::Branch) {
+      emit_simple(i, kNoLabel);
+      continue;
+    }
+
+    // Branch and its delay slot; always the last two instructions.
+    const V4DecodedControl &control = inst.control;
+    const V5Instruction &delay = plan.insts[i + 1u];
+    const u32 branch_pc = pc;
+    const u32 fallthrough = branch_pc + 8u;
+    const u32 jump_target =
+        ((branch_pc + 4u) & 0xF0000000u) | (control.imm26 << 2u);
+    const u32 branch_target =
+        branch_pc + 4u + static_cast<u32>(control.simm * 4);
+    const bool conditional =
+        control.op != V4ControlOp::J && control.op != V4ControlOp::Jal &&
+        control.op != V4ControlOp::Jr && control.op != V4ControlOp::Jalr;
+
+    // ebp: taken flag (conditional) or JR/JALR target. It survives the delay
+    // slot's memory access and host calls.
+    if (control.op == V4ControlOp::Beq || control.op == V4ControlOp::Bne) {
+      emit_read_guest(code, code.eax, control.rs);
+      emit_read_guest(code, code.ecx, control.rt);
+      code.cmp(code.eax, code.ecx);
+      if (control.op == V4ControlOp::Beq) {
+        code.sete(code.dl);
+      } else {
+        code.setne(code.dl);
+      }
+      code.movzx(code.ebp, code.dl);
+    } else if (conditional) {
+      emit_read_guest(code, code.eax, control.rs);
+      code.cmp(code.eax, 0);
+      switch (control.op) {
+      case V4ControlOp::Blez: code.setle(code.dl); break;
+      case V4ControlOp::Bgtz: code.setg(code.dl); break;
+      case V4ControlOp::Bltz:
+      case V4ControlOp::Bltzal: code.setl(code.dl); break;
+      case V4ControlOp::Bgez:
+      case V4ControlOp::Bgezal: code.setge(code.dl); break;
+      default: break;
+      }
+      code.movzx(code.ebp, code.dl);
+    } else if (control.op == V4ControlOp::Jr ||
+               control.op == V4ControlOp::Jalr) {
+      emit_read_guest(code, code.ebp, control.rs);
+    }
+    if (control.op == V4ControlOp::Jal ||
+        control.op == V4ControlOp::Bltzal ||
+        control.op == V4ControlOp::Bgezal) {
+      code.mov(code.eax, branch_pc + 8u);
+      emit_write_guest(code, 31u, code.eax);
+    } else if (control.op == V4ControlOp::Jalr) {
+      code.mov(code.eax, branch_pc + 8u);
+      emit_write_guest(code, control.rd, code.eax);
+    }
+    if (maybe_pending) {
+      v5_retire(v4_control_write_reg(control));
+      maybe_pending = false;
+    }
+    if (const u8 link = v4_control_write_reg(control); link != 0u) {
+      constants.valid[link] = false;
+    }
+    // The branch retires here (taken: 2 cycles, else 1), so its delay slot
+    // issues at its exact cycle for HI/LO stalls and timer reads.
+    if (conditional) {
+      code.lea(code.ebx, code.ptr[code.rbx + code.rbp + 1]);
+    } else {
+      code.add(code.ebx, 2u);
+    }
+
+    // The delay slot starts only while still inside the slice, exactly like
+    // Cpu::step(); otherwise, or when it needs a device/exception path, the
+    // branch yields with the slot pending (the V4 split-branch state) and
+    // the pending-delay fragment runs it.
+    const u32 yield = new_label();
+    code.cmp(code.ebx, code.r13d);
+    jcc(kAE, yield);
+    // The delay slot's own line (when it opens one) is fetched now.
+    emit_line_checks(i + 1u, yield);
+    if (delay.kind == V5Kind::Alu) {
+      // A superblock keeps running after the delay slot, so its result
+      // feeds the constant table like any other ALU instruction.
+      const u8 write_reg = v4_alu_write_reg(delay.alu);
+      const std::optional<u32> constant =
+          v4_alu_constant_result(delay.alu, constants);
+      if (write_reg != 0u) {
+        constants.valid[write_reg] = constant.has_value();
+        if (constant) {
+          constants.value[write_reg] = *constant;
+        }
+      }
+      emit_v4_alu_instruction(code, delay.alu);
+      code.inc(code.ebx);
+    } else if (delay.kind == V5Kind::Load) {
+      emit_load(i + 1u, yield);
+    } else if (delay.kind == V5Kind::Store) {
+      emit_store(i + 1u, yield);
+    } else if (delay.kind == V5Kind::Cop2) {
+      emit_cop2(i + 1u);
+    } else {
+      emit_simple(i + 1u, yield);
+    }
+    {
+      // Only the block's final branch has a published delay cache; a
+      // superblock branch yields without one (run_slice fetches the slot).
+      const V4DelayCache *yield_cache = i + 2u == count ? delay_cache : nullptr;
+      cold.push_back([&, yield, control, branch_pc, fallthrough, yield_cache,
+                      jump_target, branch_target, conditional, i]() {
+        bind(yield);
+        code.mov(code.r13d, state(offsetof(V4NativeState, cycle_budget)));
+        code.sub(code.r12d, i + 1u);
+        code.mov(state(offsetof(V4NativeState, last_pc)), branch_pc);
+        code.mov(state(offsetof(V4NativeState, last_in_delay_slot)), 0u);
+        code.mov(state(offsetof(V4NativeState, active_branch_pc)), 0u);
+        code.mov(state(offsetof(V4NativeState, pc)), branch_pc + 4u);
+        code.mov(state(offsetof(V4NativeState, pending_delay_slot)), 1u);
+        code.mov(state(offsetof(V4NativeState, pending_branch_pc)), branch_pc);
+        if (conditional) {
+          const u32 not_taken = new_label();
+          const u32 selected = new_label();
+          code.test(code.ebp, code.ebp);
+          jcc(kE, not_taken);
+          code.mov(state(offsetof(V4NativeState, next_pc)), branch_target);
+          code.mov(state(offsetof(V4NativeState, pending_branch_taken)), 1u);
+          jmp_label(selected);
+          bind(not_taken);
+          code.mov(state(offsetof(V4NativeState, next_pc)), fallthrough);
+          code.mov(state(offsetof(V4NativeState, pending_branch_taken)), 0u);
+          bind(selected);
+        } else {
+          if (control.op == V4ControlOp::Jr ||
+              control.op == V4ControlOp::Jalr) {
+            code.mov(state(offsetof(V4NativeState, next_pc)), code.ebp);
+          } else {
+            code.mov(state(offsetof(V4NativeState, next_pc)), jump_target);
+          }
+          code.mov(state(offsetof(V4NativeState, pending_branch_taken)), 1u);
+        }
+        code.mov(code.rax, reinterpret_cast<size_t>(yield_cache));
+        code.mov(code.ptr[code.r11 + static_cast<int>(offsetof(
+                              V4NativeState, pending_delay_cache))],
+                 code.rax);
+        code.mov(state(offsetof(V4NativeState, pending_delay_cache_epoch)),
+                 cache_epoch);
+        code.mov(state(offsetof(V4NativeState, scheduler_yield)), 1u);
+        emit_v4_block_return(code);
+      });
+    }
+
+    // Self-loop back-edge: a taken branch to this block's own start
+    // re-enters the body directly. Line 0 cannot have changed (no exit
+    // happened and later lines never alias it), so only the entry gates
+    // remain. The architectural last_pc/pc stores are skipped; every exit
+    // path writes its own. Expects r12d already charged for this edge.
+    const auto emit_back_edge = [&](u32 fail) {
+      code.cmp(code.r12d, count);
+      jcc(kB, fail);
+      code.cmp(code.ebx, code.r13d);
+      jcc(kAE, fail);
+      if (plan.count_entries) {
+        code.inc(code.qword[
+            code.r14 + static_cast<int>(offsetof(V4Block, profile_entries))]);
+      }
+      // Counted as a block entry and a direct link, like any other re-entry.
+      code.inc(state(offsetof(V4NativeState, block_entries)));
+      code.inc(state(offsetof(V4NativeState, direct_links)));
+      code.mov(state(offsetof(V4NativeState, current_block_refill_cycles)), 0u);
+      jmp_label(loop_label);
+    };
+    const u32 retired = i + 2u;
+    if (retired != count && inst.continue_taken) {
+      // Fused loop: the taken edge continues with the partner block in this
+      // translation; only the not-taken edge leaves.
+      const u32 stay = new_label();
+      code.test(code.ebp, code.ebp);
+      jcc(kNE, stay);
+      code.sub(code.r12d, retired);
+      code.mov(state(offsetof(V4NativeState, last_pc)), branch_pc + 4u);
+      code.mov(state(offsetof(V4NativeState, last_in_delay_slot)), 1u);
+      code.mov(state(offsetof(V4NativeState, active_branch_pc)), branch_pc);
+      code.mov(state(offsetof(V4NativeState, pc)), fallthrough);
+      code.mov(code.r14, reinterpret_cast<size_t>(inst.taken_cell));
+      emit_link_selected();
+      bind(stay);
+      ++i; // the delay slot was emitted with its branch
+      continue;
+    }
+    if (retired != count) {
+      // Superblock: only the taken edge leaves; the fall-through path keeps
+      // executing this block after the delay slot.
+      const u32 fall_through = new_label();
+      const u32 taken_link = new_label();
+      code.test(code.ebp, code.ebp);
+      jcc(kE, fall_through);
+      code.sub(code.r12d, retired);
+      if (links.entry != nullptr && branch_target == plan.insts[0].pc) {
+        emit_back_edge(taken_link);
+      }
+      bind(taken_link);
+      code.mov(state(offsetof(V4NativeState, last_pc)), branch_pc + 4u);
+      code.mov(state(offsetof(V4NativeState, last_in_delay_slot)), 1u);
+      code.mov(state(offsetof(V4NativeState, active_branch_pc)), branch_pc);
+      code.mov(state(offsetof(V4NativeState, pc)), branch_target);
+      code.mov(code.r14, reinterpret_cast<size_t>(inst.taken_cell));
+      emit_link_selected();
+      bind(fall_through);
+      ++i; // the delay slot was emitted with its branch
+      continue;
+    }
+
+    code.sub(code.r12d, count);
+    // Terminal branch: a taken edge back to this block's start is a
+    // self-loop back-edge.
+    const bool jump_kind =
+        control.op == V4ControlOp::J || control.op == V4ControlOp::Jal;
+    const bool self_loop =
+        links.entry != nullptr &&
+        (conditional ? branch_target == plan.insts[0].pc
+                     : jump_kind && jump_target == plan.insts[0].pc);
+    if (self_loop) {
+      const u32 normal_tail = new_label();
+      if (conditional) {
+        code.test(code.ebp, code.ebp);
+        jcc(kE, normal_tail);
+      }
+      emit_back_edge(normal_tail);
+      bind(normal_tail);
+    }
+    code.mov(state(offsetof(V4NativeState, last_pc)), branch_pc + 4u);
+    code.mov(state(offsetof(V4NativeState, last_in_delay_slot)), 1u);
+    code.mov(state(offsetof(V4NativeState, active_branch_pc)), branch_pc);
+    if (!conditional) {
+      if (control.op == V4ControlOp::Jr || control.op == V4ControlOp::Jalr) {
+        code.mov(state(offsetof(V4NativeState, pc)), code.ebp);
+        if (links.entry != nullptr) {
+          // Resolve the register target through the dispatch cells here and
+          // enter it like a direct link; anything unusual (unaligned target,
+          // no translation) returns to the dispatcher loop.
+          const u32 dispatcher = new_label();
+          code.test(code.ebp, 3u);
+          jcc(kNE, dispatcher);
+          code.mov(code.eax, code.ebp);
+          code.shr(code.eax, 12u);
+          code.mov(code.rcx, code.ptr[
+              code.r11 + static_cast<int>(offsetof(V4NativeState, dispatch_top))]);
+          code.mov(code.rcx, code.ptr[code.rcx + code.rax * 8]);
+          code.test(code.rcx, code.rcx);
+          jcc(kE, dispatcher);
+          code.mov(code.eax, code.ebp);
+          code.shr(code.eax, 2u);
+          code.and_(code.eax, 0x3FFu);
+          code.mov(code.r14, code.ptr[code.rcx + code.rax * 8]);
+          code.test(code.r14, code.r14);
+          jcc(kE, dispatcher);
+          code.mov(state(offsetof(V4NativeState, current_block_refill_cycles)),
+                   0u);
+          code.jmp(code.ptr[
+              code.r14 + static_cast<int>(offsetof(V4Block, linked_fn))]);
+          bind(dispatcher);
+        }
+        emit_v4_block_return(code);
+      } else {
+        code.mov(state(offsetof(V4NativeState, pc)), jump_target);
+        code.mov(code.r14, reinterpret_cast<size_t>(links.taken));
+        emit_link_selected();
+      }
+    } else {
+      const u32 not_taken = new_label();
+      const u32 selected = new_label();
+      code.test(code.ebp, code.ebp);
+      jcc(kE, not_taken);
+      code.mov(state(offsetof(V4NativeState, pc)), branch_target);
+      code.mov(code.r14, reinterpret_cast<size_t>(links.taken));
+      jmp_label(selected);
+      bind(not_taken);
+      code.mov(state(offsetof(V4NativeState, pc)), fallthrough);
+      code.mov(code.r14, reinterpret_cast<size_t>(links.fallthrough));
+      bind(selected);
+      emit_link_selected();
+    }
+    break;
+  }
+
+  if (!plan.ends_with_branch) {
+    emit_v4_alu_cache_flush(code, cache);
+    code.mov(state(offsetof(V4NativeState, pc)), pc_of(count));
+    code.mov(state(offsetof(V4NativeState, last_pc)), pc_of(count - 1u));
+    code.mov(state(offsetof(V4NativeState, last_in_delay_slot)), 0u);
+    code.mov(state(offsetof(V4NativeState, active_branch_pc)), 0u);
+    code.sub(code.r12d, count);
+    emit_link(links.fallthrough);
+  }
+
+  g_v5_hot_bytes += code.getSize();
+  // Cold paths may append further deferred code while emitting.
+  for (size_t c = 0; c < cold.size(); ++c) {
+    cold[c]();
+  }
+  for (u32 i = 0; i <= count; ++i) {
+    BoundaryExit &exit = exits[i];
+    if (exit.label == kNoLabel) {
+      continue;
+    }
+    bind(exit.label);
+    emit_v4_alu_cache_flush(code, exit.cache);
+    if (i >= 2u && plan.insts[i - 2u].kind == V5Kind::Branch) {
+      // Right after a not-taken superblock branch: the last retired
+      // instruction is its delay slot.
+      code.mov(code.r13d, state(offsetof(V4NativeState, cycle_budget)));
+      code.sub(code.r12d, i);
+      code.mov(state(offsetof(V4NativeState, pc)), pc_of(i));
+      code.mov(state(offsetof(V4NativeState, last_pc)), pc_of(i - 1u));
+      code.mov(state(offsetof(V4NativeState, last_in_delay_slot)), 1u);
+      code.mov(state(offsetof(V4NativeState, active_branch_pc)),
+               pc_of(i - 2u));
+      emit_v4_block_return(code);
+    } else {
+      emit_commit_and_return(i);
+    }
+  }
+  code.ready();
+
+  u8 *const base = const_cast<u8 *>(code.getCode());
+  for (const auto &[label, field] : fixups) {
+    const s32 target = label_offsets[label];
+    if (target < 0) {
+      return nullptr; // unbound label: an emitter bug, never run this block
+    }
+    const s32 displacement = target - static_cast<s32>(field + 4u);
+    std::memcpy(base + field, &displacement, sizeof(displacement));
+  }
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  g_v5_total_bytes += code_size;
+  // VIBESTATION_V5_DUMP=<n> (n-th V5 compile) or VIBESTATION_V5_DUMP_PC=<hex>
+  // (first compile at that guest PC): write the machine code and guest words
+  // to v5_block.bin / v5_block.txt for disassembly.
+  static const long dump_index = [] {
+    const char *value = std::getenv("VIBESTATION_V5_DUMP");
+    return value != nullptr ? std::atol(value) : -1L;
+  }();
+  static long compiled_blocks = 0;
+  static const unsigned long dump_pc = [] {
+    const char *value = std::getenv("VIBESTATION_V5_DUMP_PC");
+    return value != nullptr ? std::strtoul(value, nullptr, 16) : 0ul;
+  }();
+  static bool dumped_pc = false;
+  const bool dump_this_pc =
+      !dumped_pc && dump_pc != 0ul && plan.insts[0].pc == dump_pc;
+  dumped_pc = dumped_pc || dump_this_pc;
+  if (compiled_blocks++ == dump_index || dump_this_pc) {
+    if (FILE *out = std::fopen("v5_block.bin", "wb")) {
+      std::fwrite(buffer, 1u, code_size, out);
+      std::fclose(out);
+    }
+    if (FILE *out = std::fopen("v5_block.txt", "w")) {
+      std::fprintf(out, "body_offset=%zu\n", body_offset);
+      for (u32 i = 0; i < count; ++i) {
+        std::fprintf(out, "%08X %08X kind=%u\n", plan.insts[i].pc,
+                     plan.insts[i].bits,
+                     static_cast<unsigned>(plan.insts[i].kind));
+      }
+      std::fclose(out);
+    }
+  }
+  linked_prologue = static_cast<u8 *>(buffer) + linked_offset;
   return reinterpret_cast<V4NativeFn>(buffer);
 }
 
@@ -7908,14 +10222,14 @@ u32 v4_resident_device_boundary(V4NativeState *state, u32 cycles,
 
 V4ResidentDispatchFn install_v4_resident_dispatch(
     V4CodeArena &arena, V4NativeState *bound_state,
-    void *&block_return, void *&linked_entry) {
+    void *&block_return, void *&linked_entry, bool count_entries) {
   using namespace Xbyak;
   constexpr size_t kReservation = 4096u;
   void *buffer = arena.begin_emit(kReservation);
   if (buffer == nullptr) {
     return nullptr;
   }
-  CodeGenerator code(kReservation, buffer);
+  CodeGenerator &code = v4_generator(buffer, kReservation);
   code.setDefaultJmpNEAR(true);
   Label loop, check_block, after_block, done;
   Label missing, stale_epoch, blocked_memory, stale_generation, budget_exit;
@@ -7955,7 +10269,7 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   code.mov(code.ebx, code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))]);
   code.mov(code.r13d, code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cache_epoch))]);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
   code.mov(code.r15, code.ptr[
       code.r11 +
       static_cast<int>(offsetof(V4NativeState, icache_generations))]);
@@ -7986,6 +10300,7 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   code.mov(code.edx, static_cast<u32>(Exception::AddrLoadErr));
 
   code.L(entry_exception_common);
+  emit_v4_exception_gte_anchor(code, V4ExceptionAnchor::FirstInstruction);
   // Exceptions flush/commit the pending load before the handler observes GPRs.
   emit_retire_incoming_load(code, 0u);
 
@@ -8129,9 +10444,13 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   code.L(check_block);
   code.test(code.r14, code.r14);
   code.jz(missing);
+  // r13d holds the slice cycle budget (V5 blocks check it per instruction),
+  // so the epoch is compared from memory.
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cache_epoch))]);
   code.cmp(code.dword[
                code.r14 + static_cast<int>(offsetof(V4Block, cache_epoch))],
-           code.r13d);
+           code.eax);
   code.jne(stale_epoch);
 
   {
@@ -8237,7 +10556,7 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
       code.xor_(code.r9d, code.r9d);
       code.L(compare_loop);
       code.cmp(code.r9d, code.dword[
-          code.r14 + static_cast<int>(offsetof(V4Block, instruction_count))]);
+          code.r14 + static_cast<int>(offsetof(V4Block, revalidate_count))]);
       code.jae(revalidate_done);
 
       // If this entry can only use the one-instruction scheduler-tail fragment,
@@ -8572,6 +10891,10 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   code.jmp(code.rax);
 
   code.L(full_cycle_budget);
+  if (count_entries) {
+    code.inc(code.qword[
+        code.r14 + static_cast<int>(offsetof(V4Block, profile_entries))]);
+  }
   code.mov(code.rax, code.ptr[
       code.r14 + static_cast<int>(offsetof(V4Block, fn))]);
   code.test(code.rax, code.rax);
@@ -8849,6 +11172,14 @@ struct CpuRecompilerBackend::Impl {
   size_t permanent_code_bytes = 0u;
   bool direct_links_enabled = true;
   bool crossline_branch_enabled = true;
+  bool v5_enabled = true;
+  bool superblocks_enabled = false;
+  bool loop_fusion_enabled = true;
+  bool block_profile = false;
+  V5Stubs v5_stubs{};
+  bool translated_pgxp = false;
+  size_t stubs_offset = 0u;
+  u32 icache_line_stride = 0;
   bool initialization_attempted = false;
   bool initialized = false;
 
@@ -8879,12 +11210,32 @@ struct CpuRecompilerBackend::Impl {
         std::getenv("VIBESTATION_V4_DISABLE_CROSSLINE_BRANCH");
     crossline_branch_enabled =
         disable_crossline == nullptr || disable_crossline[0] != '1';
+    const char *disable_v5 = std::getenv("VIBESTATION_V5_DISABLE");
+    v5_enabled = disable_v5 == nullptr || disable_v5[0] != '1';
+    // Superblocks (continuing past not-taken branches) cost more compile
+    // time than they save on the measured games; opt in to experiment.
+    const char *superblocks = std::getenv("VIBESTATION_V5_SUPERBLOCK");
+    superblocks_enabled = superblocks != nullptr && superblocks[0] == '1';
+    const char *no_fusion = std::getenv("VIBESTATION_V5_NO_LOOP_FUSION");
+    loop_fusion_enabled = no_fusion == nullptr || no_fusion[0] != '1';
+    const char *block_profile_env = std::getenv("VIBESTATION_BLOCK_PROFILE");
+    block_profile = block_profile_env != nullptr && block_profile_env[0] == '1';
     resident_dispatch =
         install_v4_resident_dispatch(arena, &native_state,
                                      resident_block_return,
-                                     resident_linked_entry);
+                                     resident_linked_entry, block_profile);
     if (resident_dispatch == nullptr || resident_block_return == nullptr ||
         resident_linked_entry == nullptr) {
+      return false;
+    }
+    stubs_offset = arena.bytes_used();
+    bool stubs_ok = false;
+    try {
+      stubs_ok = install_v5_stubs(arena, v5_stubs);
+    } catch (...) {
+      stubs_ok = false;
+    }
+    if (!stubs_ok) {
       return false;
     }
     permanent_code_bytes = arena.bytes_used();
@@ -9065,6 +11416,478 @@ struct CpuRecompilerBackend::Impl {
     return block;
   }
 
+  // VIBESTATION_BLOCK_PROFILE: why translations get compiled.
+  std::array<u64, 4> compile_reasons{}; // [slice start][inside a live block]
+  u64 profile_native_ns = 0;
+  u64 profile_slice_calls = 0;
+  u64 profile_slice_ns = 0;
+  u64 profile_compile_ns = 0;
+  u64 profile_v5_emit_ns = 0;
+  u64 profile_v5_compiles = 0;
+  // [missing, generation, pending delay, host boundary, budget no-progress,
+  //  budget, other]; entry exceptions counted separately.
+  std::array<u64, 7> dispatch_return_reasons{};
+  u64 entry_exceptions = 0;
+  std::unordered_map<u32, u64> pending_return_pcs;
+  void profile_compile_reason(u32 pc, bool slice_start) {
+    bool inside = false;
+    for (u32 back = 1u; back < kV4MaxBlockInstructions && !inside; ++back) {
+      const V4DispatchEntry *entry = dispatch_entry(pc - back * 4u, false);
+      const V4Block *other = entry != nullptr ? entry->block : nullptr;
+      inside = other != nullptr && other->cache_epoch == cache_epoch &&
+               other->start_pc == pc - back * 4u &&
+               other->instruction_count > back;
+    }
+    ++compile_reasons[(slice_start ? 2u : 0u) + (inside ? 1u : 0u)];
+    if (inside && !slice_start) {
+      // What precedes a mid-run entry: a memory op (device exit), or not.
+      u32 previous = 0u;
+      for (u32 back = 1u; back < kV4MaxBlockInstructions; ++back) {
+        const V4DispatchEntry *entry = dispatch_entry(pc - back * 4u, false);
+        const V4Block *other = entry != nullptr ? entry->block : nullptr;
+        if (other != nullptr && other->cache_epoch == cache_epoch &&
+            other->start_pc == pc - back * 4u &&
+            other->instruction_count > back) {
+          previous = other->guest_bits[back - 1u];
+          break;
+        }
+      }
+      const u32 primary = previous >> 26;
+      ++inside_after[(primary >= 0x20u && primary < 0x30u) ? 0u
+                     : primary == 0x10u                    ? 1u
+                     : (primary == 0u && (previous & 0x3Fu) == 0x08u) ? 2u
+                                                                      : 3u];
+    }
+  }
+  std::array<u64, 4> inside_after{}; // [mem, cop0, jr, other]
+
+  // Straight-line V5 instruction kinds (anything but a branch).
+  static bool v5_classify(u32 bits, V5Instruction &inst) {
+    if (decode_v4_alu(bits, inst.alu)) {
+      inst.kind = V5Kind::Alu;
+      return true;
+    }
+    if (decode_v4_load(bits, inst.load) && !inst.load.dest_cop0) {
+      inst.kind = V5Kind::Load;
+      return true;
+    }
+    if (decode_v4_store(bits, inst.store) && !inst.store.source_cop0) {
+      inst.kind = V5Kind::Store;
+      return true;
+    }
+    if (decode_v4_hilo(bits, inst.hilo)) {
+      inst.kind = V5Kind::HiLo;
+      return true;
+    }
+    if (decode_v4_muldiv(bits, inst.muldiv)) {
+      inst.kind = V5Kind::MulDiv;
+      return true;
+    }
+    if (decode_v4_overflow_alu(bits, inst.overflow)) {
+      inst.kind = V5Kind::Overflow;
+      return true;
+    }
+    if (decode_v4_cop2(bits, inst.cop2)) {
+      inst.kind = v4_cop2_is_memory(inst.cop2) ? V5Kind::Cop2Mem : V5Kind::Cop2;
+      return true;
+    }
+    return false;
+  }
+
+  // Builds and emits a V5 mixed block. Returns true when `block` now holds it.
+  // Returns false with failed == false when the code is not a V5 shape (the
+  // block header is untouched), or failed == true when emission failed.
+  bool try_compile_v5(Cpu &cpu, CpuBackendStats &stats, V4Block *block,
+                      u32 start_pc, bool cacheable,
+                      u32 first_line_instructions, u32 page_instructions,
+                      bool &failed) {
+    failed = false;
+    V5BlockPlan plan{};
+    plan.cacheable = cacheable;
+    plan.stop_on_code_store = !cacheable;
+    plan.icache_line_stride = icache_line_stride;
+    plan.phys_page = block->phys_page;
+    plan.count_entries = block_profile;
+    const u32 start_line = start_pc & ~0x0Fu;
+    // Line 0 must be guest-visible (the caller refilled it). Later lines may
+    // not be resident yet; their words come from memory and are revalidated
+    // in-block against the I-cache before they run.
+    const auto read_word = [&](u32 pc, u32 &bits) {
+      if (cpu.read_visible_instruction_for_backend(pc, bits)) {
+        return true;
+      }
+      if (!cacheable || (pc & ~0x0Fu) == start_line) {
+        return false;
+      }
+      bits = cpu.read_instruction_for_backend(pc);
+      return true;
+    };
+    // Decodes a sequential run at run_pc into plan.insts[base...], at most
+    // `max` instructions, and returns how many it took (a final branch keeps
+    // its delay slot).
+    const auto decode_run = [&](u32 run_pc, u32 base, u32 max) -> u32 {
+      u32 taken = 0u;
+      for (u32 k = 0; k < max; ++k) {
+        const u32 pc = run_pc + k * 4u;
+        u32 bits = 0u;
+        if (!read_word(pc, bits)) {
+          break;
+        }
+        V5Instruction &inst = plan.insts[base + k];
+        inst = {};
+        inst.pc = pc;
+        inst.bits = bits;
+        if (v5_classify(bits, inst)) {
+          taken = k + 1u;
+          continue;
+        }
+        V4DecodedControl control{};
+        u32 delay_bits = 0u;
+        if (k + 1u < max && decode_v4_control(bits, control) &&
+            !v4_control_is_likely(control) && read_word(pc + 4u, delay_bits)) {
+          V5Instruction &slot = plan.insts[base + k + 1u];
+          slot = {};
+          slot.pc = pc + 4u;
+          slot.bits = delay_bits;
+          // LWC2/SWC2 in a delay slot stay with the V4 split branch.
+          if (v5_classify(delay_bits, slot) && slot.kind != V5Kind::Cop2Mem) {
+            inst.kind = V5Kind::Branch;
+            inst.control = control;
+            taken = k + 2u;
+            // Superblock: a conditional branch continues along its
+            // fall-through path; the taken edge leaves through its own link.
+            const bool conditional_branch =
+                control.op != V4ControlOp::J && control.op != V4ControlOp::Jal &&
+                control.op != V4ControlOp::Jr && control.op != V4ControlOp::Jalr;
+            if (conditional_branch && superblocks_enabled && k + 2u < max) {
+              ++k;
+              continue;
+            }
+          }
+        }
+        break;
+      }
+      return taken;
+    };
+    const u32 limit = std::min(kV4MaxBlockInstructions, page_instructions);
+    plan.count = decode_run(start_pc, 0u, limit);
+    if (plan.count < 2u) {
+      return false;
+    }
+
+    // Two-block loop fusion: when this block's final conditional branch goes
+    // to a block that branches straight back here, follow the taken edge in
+    // the same translation (the not-taken edge leaves). The loop then runs
+    // on the self-loop back-edge. Every line of the fused block must have its
+    // own I-cache index, so in-block refills never evict line 0.
+    if (cacheable && loop_fusion_enabled &&
+        plan.insts[plan.count - 2u].kind == V5Kind::Branch) {
+      V5Instruction &branch = plan.insts[plan.count - 2u];
+      const V4DecodedControl &control = branch.control;
+      const bool conditional =
+          control.op != V4ControlOp::J && control.op != V4ControlOp::Jal &&
+          control.op != V4ControlOp::Jr && control.op != V4ControlOp::Jalr;
+      const u32 target = branch.pc + 4u + static_cast<u32>(control.simm * 4);
+      const u32 target_room =
+          (0x1000u - (psx::mask_address(target) & 0x0FFFu)) >> 2u;
+      if (conditional && target != start_pc &&
+          plan.count < kV4MaxBlockInstructions &&
+          cpu.instruction_cacheable(target)) {
+        const u32 room =
+            std::min(kV4MaxBlockInstructions - plan.count, target_room);
+        const u32 added = decode_run(target, plan.count, room);
+        bool fuse = added >= 2u;
+        if (fuse) {
+          const V5Instruction &back = plan.insts[plan.count + added - 2u];
+          const V4DecodedControl &bc = back.control;
+          const u32 back_target =
+              (bc.op == V4ControlOp::J || bc.op == V4ControlOp::Jal)
+                  ? (((back.pc + 4u) & 0xF0000000u) | (bc.imm26 << 2u))
+                  : back.pc + 4u + static_cast<u32>(bc.simm * 4);
+          fuse = back.kind == V5Kind::Branch &&
+                 bc.op != V4ControlOp::Jr && bc.op != V4ControlOp::Jalr &&
+                 back_target == start_pc;
+          for (u32 i = 0; fuse && i < plan.count + added; ++i) {
+            for (u32 j = 0; fuse && j < i; ++j) {
+              const u32 a_line = psx::mask_address(plan.insts[i].pc) & ~0x0Fu;
+              const u32 b_line = psx::mask_address(plan.insts[j].pc) & ~0x0Fu;
+              fuse = a_line == b_line ||
+                     ((a_line >> 4u) & 0xFFu) != ((b_line >> 4u) & 0xFFu);
+            }
+          }
+        }
+        if (fuse) {
+          // Line checks needed (each 16-byte boundary or jump) must fit the
+          // generation slots.
+          u32 lines = 0u;
+          for (u32 i = 1; i < plan.count + added; ++i) {
+            const u32 pc = plan.insts[i].pc;
+            if ((pc & 0x0Fu) == 0u || pc != plan.insts[i - 1u].pc + 4u) {
+              ++lines;
+            }
+          }
+          fuse = lines + 1u < plan.checks.size();
+        }
+        if (fuse) {
+          branch.continue_taken = true;
+          plan.count += added;
+        }
+      }
+    }
+    plan.ends_with_branch =
+        plan.insts[plan.count - 2u].kind == V5Kind::Branch;
+    // Instructions fetched from line 0 before the block leaves it.
+    plan.line0_words = 0u;
+    while (plan.line0_words < plan.count &&
+           plan.insts[plan.line0_words].pc == start_pc + plan.line0_words * 4u &&
+           ((start_pc + plan.line0_words * 4u) & ~0x0Fu) == start_line) {
+      ++plan.line0_words;
+    }
+
+    // Generation slot per later line. A line that is not resident with this
+    // block's tag records an already-stale generation, so its first pass
+    // revalidates (and leaves the block if it still is not resident).
+    std::array<u32, 10> line_generations{};
+    if (cacheable) {
+      for (u32 i = 1; i < plan.count; ++i) {
+        // A new line starts at a 16-byte boundary or where a fused loop
+        // jumps (not sequential).
+        const u32 pc = plan.insts[i].pc;
+        const bool jumped = pc != plan.insts[i - 1u].pc + 4u;
+        if ((pc & 0x0Fu) != 0u && !jumped) {
+          continue;
+        }
+        if (plan.check_count + 2u > plan.checks.size()) {
+          return false; // not reached: fusion stays within the slots
+        }
+        V5LineCheck &check = plan.checks[plan.check_count];
+        check.slot = plan.check_count + 1u;
+        // Checked where the CPU fetches the line, including a delay slot's
+        // line right after its branch.
+        check.before_index = i;
+        check.icache_index = (pc >> 4u) & 0xFFu;
+        check.tag = psx::mask_address(pc) & ~0x0Fu;
+        check.first_instruction = i;
+        check.first_word = (pc >> 2u) & 3u;
+        check.word_count = 0u;
+        while (i + check.word_count < plan.count &&
+               check.first_word + check.word_count < 4u &&
+               plan.insts[i + check.word_count].pc ==
+                   pc + check.word_count * 4u) {
+          ++check.word_count;
+        }
+        u32 visible = 0u;
+        const u32 generation = cpu.instruction_cache_generation_for_backend(pc);
+        line_generations[check.slot] =
+            cpu.read_visible_instruction_for_backend(pc, visible)
+                ? generation
+                : generation - 1u;
+        ++plan.check_count;
+      }
+    }
+
+    V4LinkTargets links{};
+    links.entry = direct_links_enabled ? resident_linked_entry : nullptr;
+    if (direct_links_enabled) {
+      if (plan.ends_with_branch) {
+        const V5Instruction &branch = plan.insts[plan.count - 2u];
+        const V4DecodedControl &control = branch.control;
+        if (control.op == V4ControlOp::J || control.op == V4ControlOp::Jal) {
+          links.taken = dispatch_entry(
+              ((branch.pc + 4u) & 0xF0000000u) | (control.imm26 << 2u), true);
+        } else if (control.op != V4ControlOp::Jr &&
+                   control.op != V4ControlOp::Jalr) {
+          links.taken = dispatch_entry(
+              branch.pc + 4u + static_cast<u32>(control.simm * 4), true);
+          links.fallthrough = dispatch_entry(branch.pc + 8u, true);
+        }
+      } else {
+        links.fallthrough = dispatch_entry(start_pc + plan.count * 4u, true);
+      }
+    }
+    if (direct_links_enabled) {
+      for (u32 i = 0; i + 2u < plan.count; ++i) {
+        V5Instruction &inst = plan.insts[i];
+        if (inst.kind == V5Kind::Branch) {
+          inst.taken_cell = dispatch_entry(
+              inst.continue_taken
+                  ? inst.pc + 8u
+                  : inst.pc + 4u + static_cast<u32>(inst.control.simm * 4),
+              true);
+        }
+      }
+    }
+
+    ++stats.native_compile_attempts;
+    u32 code_size = 0u;
+    void *linked_prologue = nullptr;
+    V4NativeFn fn = nullptr;
+    // A memory delay slot that needs a device/exception path yields with the
+    // slot pending; publish the fragment that runs it, as V4 split branches do.
+    const V4DelayCache *delay_cache = nullptr;
+    const bool branch_first = plan.insts[0].kind == V5Kind::Branch;
+    if (plan.ends_with_branch && cacheable) {
+      const V5Instruction &delay = plan.insts[plan.count - 1u];
+      // Any final branch may yield before its delay slot; publish the
+      // fragment the dispatcher continues with.
+      {
+        const V4NativeFn delay_fn = pending_delay_alu_for(delay.bits);
+        if (delay_fn == nullptr) {
+          failed = true;
+          return false;
+        }
+        block->delay_cache.fn = delay_fn;
+        block->delay_cache.tag = psx::mask_address(delay.pc) & ~0x0Fu;
+        block->delay_cache.bits = delay.bits;
+        delay_cache = &block->delay_cache;
+      }
+    }
+    try {
+      const auto emit_start = block_profile
+                                  ? std::chrono::steady_clock::now()
+                                  : std::chrono::steady_clock::time_point{};
+      fn = compile_v5_block(arena, plan, links, delay_cache, cache_epoch,
+                            v5_stubs, resident_linked_entry, linked_prologue,
+                            code_size);
+      if (block_profile) {
+        profile_v5_emit_ns += static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - emit_start)
+                .count());
+        ++profile_v5_compiles;
+      }
+    } catch (...) {
+      fn = nullptr;
+    }
+    if (fn == nullptr) {
+      failed = true;
+      return false;
+    }
+
+    block->fn = fn;
+    block->linked_fn = linked_prologue;
+    // Entered with ebx >= budget (or a short instruction budget) the block
+    // runs exactly its first instruction, which is the budget-fragment rule.
+    // A leading branch whose delay slot opens line 1 keeps the V4 split
+    // fragment: the dispatcher may validate only line 0 before using it.
+    block->budget_fn = fn;
+    block->budget_requires_empty_chain = false;
+    if (branch_first && plan.second_line) {
+      u32 budget_size = 0u;
+      block->budget_fn = compile_v4_budget_branch(
+          arena, plan.insts[0].control, start_pc, budget_size, delay_cache,
+          cache_epoch);
+      if (block->budget_fn == nullptr) {
+        failed = true;
+        return false;
+      }
+      block->budget_requires_empty_chain = true;
+    }
+    block->code_size = code_size;
+    block->v5 = true;
+    block->instruction_count = plan.count;
+    block->revalidate_count =
+        cacheable ? plan.line0_words : plan.count;
+    // The dispatcher's strict gate becomes "ebx < budget"; the block checks
+    // the budget itself before every later instruction.
+    // Any branch checks its own delay slot against the budget and yields.
+    block->max_cycles = 1u;
+    block->v5_line_generations = line_generations;
+    for (u32 i = 0; i < plan.count; ++i) {
+      block->v5_pcs[i] = plan.insts[i].pc;
+    }
+    block->v5_pcs[plan.count] = plan.insts[plan.count - 1u].pc + 4u;
+    if (plan.second_line) {
+      block->second_icache_line = true;
+      block->icache_line_count = 2u;
+      block->second_icache_index = static_cast<u16>(plan.second_line_index);
+      block->second_icache_generation = plan.second_line_generation;
+      block->revalidate_count = plan.count;
+    }
+    block->profile_shape = plan.ends_with_branch ? 2u : 1u;
+    block->profile_end_bits = 0xFFFFFFFFu;
+    if (!plan.ends_with_branch) {
+      u32 end_bits = 0u;
+      if (read_word(start_pc + plan.count * 4u, end_bits)) {
+        block->profile_end_bits = end_bits;
+      }
+    }
+    block->has_control = false;
+    for (u32 i = 0; i < plan.count; ++i) {
+      block->has_control =
+          block->has_control || plan.insts[i].kind == V5Kind::Branch;
+    }
+    block->has_memory = false;
+    for (u32 i = 0; i < plan.count; ++i) {
+      const V5Instruction &inst = plan.insts[i];
+      block->guest_bits[i] = inst.bits;
+      if (inst.kind == V5Kind::Load || inst.kind == V5Kind::Store ||
+          inst.kind == V5Kind::Cop2Mem) {
+        block->has_memory = true;
+      }
+      const u32 code_phys = v4_normalize_code_phys(psx::mask_address(inst.pc));
+      code_pages.mark_address(code_phys);
+      code_lines.mark_address(code_phys);
+    }
+
+    install(start_pc, block);
+    ++stats.native_compile_successes;
+    ++stats.native_blocks_compiled;
+    ++stats.native_compiled_block_size_histogram[block->instruction_count];
+    if (block->has_memory) {
+      ++stats.native_memory_blocks_compiled;
+    }
+    if (block->has_control) {
+      ++stats.native_branch_tail_blocks_compiled;
+    }
+    if (!block->has_memory && !block->has_control) {
+      ++stats.native_alu_blocks_compiled;
+    }
+    {
+      // Same constant-address accounting as the V4 memory fragments.
+      V4AluConstantState constants{};
+      for (u32 i = 0; i < plan.count; ++i) {
+        const V5Instruction &inst = plan.insts[i];
+        if (inst.kind == V5Kind::Alu) {
+          const u8 write_reg = v4_alu_write_reg(inst.alu);
+          if (write_reg != 0u) {
+            const std::optional<u32> value =
+                v4_alu_constant_result(inst.alu, constants);
+            constants.valid[write_reg] = value.has_value();
+            constants.value[write_reg] = value.value_or(0u);
+          }
+          continue;
+        }
+        if (inst.kind != V5Kind::Load && inst.kind != V5Kind::Store) {
+          continue;
+        }
+        const bool is_load = inst.kind == V5Kind::Load;
+        const u8 base = is_load ? inst.load.rs : inst.store.rs;
+        if (constants.valid[base]) {
+          const u32 phys = (constants.value[base] +
+                            static_cast<u32>(is_load ? inst.load.simm
+                                                     : inst.store.simm)) &
+                           0x1FFFFFFFu;
+          if (phys < psx::RAM_SIZE || phys >= 0x1F800000u) {
+            if (is_load) {
+              ++stats.native_constant_address_load_blocks_compiled;
+            } else {
+              ++stats.native_constant_address_store_blocks_compiled;
+            }
+          }
+        }
+        if (is_load && inst.load.rt != 0u) {
+          constants.valid[inst.load.rt] = false;
+        }
+      }
+    }
+    ++stats.native_blocks;
+    stats.block_count = static_cast<u32>(block_count);
+    stats.native_code_bytes = arena.bytes_used();
+    stats.code_bytes = arena.bytes_used();
+    return true;
+  }
+
   V4Block *compile_block(Cpu &cpu, CpuBackendStats &stats, u32 start_pc,
                          bool cacheable, u32 icache_generation,
                          u32 cached_line_span = 1u, bool force_new = false) {
@@ -9104,6 +11927,23 @@ struct CpuRecompilerBackend::Impl {
     auto read_visible = [&](u32 addr, u32 &bits) {
       return cpu.read_visible_instruction_for_backend(addr, bits);
     };
+
+    if (v5_enabled && icache_line_stride != 0u) {
+      bool v5_failed = false;
+      if (try_compile_v5(cpu, stats, block, start_pc, cacheable,
+                         first_line_instructions, page_instructions,
+                         v5_failed)) {
+        return block;
+      }
+      if (v5_failed) {
+        if (!reused_block) {
+          --block_count;
+        }
+        ++stats.native_compile_failures;
+        return nullptr;
+      }
+      // Not a V5 shape; the block header is untouched for the V4 path.
+    }
 
     std::array<V4DecodedInstruction, kV4MaxBlockInstructions> decoded{};
     u32 count = 0u;
@@ -9457,6 +12297,18 @@ struct CpuRecompilerBackend::Impl {
         return nullptr;
       }
       block->fn = entry;
+      block->linked_fn = resident_linked_entry;
+      block->profile_end_bits = control_candidate ? delay_bits : 0u;
+      block->profile_shape =
+          simple_native_unknown ? 10u : likely_control ? 11u
+          : split_control ? 12u : simple_exception ? 13u
+          : simple_cop_unusable ? 14u : simple_cop2 ? 15u
+          : simple_cop0 ? 16u : simple_muldiv ? 17u : simple_hilo ? 18u
+          : simple_cond_move ? 19u : simple_trap ? 20u
+          : simple_overflow_alu ? 21u : guarded_control ? 22u
+          : (guarded_store_control || guarded_load_control) ? 23u
+          : simple_control ? 24u : simple_load ? 25u
+          : simple_store ? 26u : 27u;
 
       // Compile a scheduler-tail fragment. Straight-line work uses a one-op
       // native prefix. A branch at the start of the block may also execute
@@ -9544,6 +12396,7 @@ struct CpuRecompilerBackend::Impl {
                                           ? count + store_tail_count +
                                                 (store_has_control ? 3u : 1u)
                                           : count))));
+      block->revalidate_count = block->instruction_count;
       const u32 store_issue_max_cycles =
           simple_store &&
                   (store.op == V4StoreOp::Swl ||
@@ -9707,7 +12560,8 @@ struct CpuRecompilerBackend::Impl {
       const u32 candidate_pc = line_start - delta;
       V4DispatchEntry *entry = dispatch_entry(candidate_pc, false);
       V4Block *candidate = entry != nullptr ? entry->block : nullptr;
-      if (candidate == nullptr || candidate->cache_epoch != cache_epoch ||
+      if (candidate == nullptr || candidate->v5 ||
+          candidate->cache_epoch != cache_epoch ||
           candidate->start_pc != candidate_pc || !candidate->cacheable || candidate->icache_line_count == 0u ||
           candidate->icache_line_count >= 4u ||
           candidate->has_control || candidate->has_memory ||
@@ -9763,7 +12617,242 @@ CpuRecompilerBackend::CpuRecompilerBackend(Cpu &cpu)
   stats_.native_available = impl_->native_available();
 }
 
-CpuRecompilerBackend::~CpuRecompilerBackend() = default;
+namespace {
+
+#if VIBESTATION_JIT_V4_X64
+const char *v5_profile_opcode_class(u32 bits) {
+  if (bits == 0xFFFFFFFFu) {
+    return "unreadable/limit";
+  }
+  const u32 primary = bits >> 26;
+  const u32 funct = bits & 0x3Fu;
+  if (primary == 0u) {
+    switch (funct) {
+    case 0x08: case 0x09: return "jr/jalr";
+    case 0x0C: return "syscall";
+    case 0x0D: return "break";
+    case 0x10: case 0x12: return "mfhi/mflo";
+    case 0x11: case 0x13: return "mthi/mtlo";
+    case 0x18: case 0x19: return "mult";
+    case 0x1A: case 0x1B: return "div";
+    case 0x20: case 0x22: return "add/sub(ovf)";
+    default: return "special-other";
+    }
+  }
+  switch (primary) {
+  case 0x01: return "bcondz";
+  case 0x02: case 0x03: return "j/jal";
+  case 0x04: case 0x05: case 0x06: case 0x07: return "branch";
+  case 0x08: return "addi(ovf)";
+  case 0x10: return "cop0";
+  case 0x12: return (bits & (1u << 25)) != 0u ? "gte-command" : "cop2-move";
+  case 0x14: case 0x15: case 0x16: case 0x17: return "branch-likely";
+  case 0x30: return "lwc0";
+  case 0x32: return "lwc2";
+  case 0x38: return "swc0";
+  case 0x3A: return "swc2";
+  default:
+    if (primary >= 0x20u && primary < 0x28u) return "load";
+    if (primary >= 0x28u && primary < 0x30u) return "store";
+    return "other";
+  }
+}
+
+const char *v5_profile_shape_name(u8 shape) {
+  switch (shape) {
+  case 1: return "V5 straight";
+  case 2: return "V5 branch";
+  case 10: return "V4 unknown";
+  case 11: return "V4 likely-head";
+  case 12: return "V4 split-branch";
+  case 13: return "V4 exception";
+  case 14: return "V4 cop-unusable";
+  case 15: return "V4 cop2";
+  case 16: return "V4 cop0";
+  case 17: return "V4 muldiv";
+  case 18: return "V4 hilo";
+  case 19: return "V4 cond-move";
+  case 20: return "V4 trap";
+  case 21: return "V4 overflow-alu";
+  case 22: return "V4 guarded-branch";
+  case 23: return "V4 mem-delay-branch";
+  case 24: return "V4 branch";
+  case 25: return "V4 load";
+  case 26: return "V4 store";
+  case 27: return "V4 alu";
+  default: return "unknown";
+  }
+}
+#endif
+
+} // namespace
+
+CpuRecompilerBackend::~CpuRecompilerBackend() {
+#if VIBESTATION_JIT_V4_X64
+  if (impl_ == nullptr || !impl_->block_profile || !impl_->initialized) {
+    return;
+  }
+  struct Row {
+    u64 entries = 0;
+    u64 instructions = 0;
+    u64 blocks = 0;
+  };
+  std::unordered_map<std::string, Row> rows;
+  u64 total_entries = 0;
+  u64 total_instructions = 0;
+  for (size_t i = 0; i < impl_->block_count; ++i) {
+    const V4Block &block = impl_->blocks[i];
+    if (block.profile_entries == 0u) {
+      continue;
+    }
+    std::string key = v5_profile_shape_name(block.profile_shape);
+    if (block.profile_shape == 1u) {
+      key += " -> ";
+      key += v5_profile_opcode_class(block.profile_end_bits);
+    } else if (block.profile_shape >= 10u) {
+      key += " [";
+      key += v5_profile_opcode_class(block.guest_bits[0]);
+      if (block.profile_shape == 12u || block.profile_shape == 22u ||
+          block.profile_shape == 23u) {
+        key += ", delay ";
+        key += v5_profile_opcode_class(block.profile_end_bits);
+      }
+      key += "]";
+    }
+    Row &row = rows[key];
+    row.entries += block.profile_entries;
+    row.instructions += block.profile_entries * block.instruction_count;
+    ++row.blocks;
+    total_entries += block.profile_entries;
+    total_instructions += block.profile_entries * block.instruction_count;
+  }
+  {
+    // How many translations share one end address: >1 means several entry
+    // points into the same straight-line run (mid-block re-entries).
+    std::unordered_map<u32, u32> per_end;
+    u32 live_blocks = 0;
+    for (size_t i = 0; i < impl_->block_count; ++i) {
+      const V4Block &block = impl_->blocks[i];
+      if (block.cache_epoch != impl_->cache_epoch || block.fn == nullptr) {
+        continue;
+      }
+      ++live_blocks;
+      ++per_end[block.start_pc + block.instruction_count * 4u];
+    }
+    std::array<u32, 6> histogram{};
+    for (const auto &entry : per_end) {
+      ++histogram[std::min<u32>(entry.second, 5u)];
+    }
+    std::printf("BLOCK_PROFILE time run_slice_calls=%llu run_slice_ms=%.1f "
+                "resident_native_ms=%.1f compile_ms=%.1f v5_emit_ms=%.1f "
+                "v5_compiles=%llu\n",
+                static_cast<unsigned long long>(impl_->profile_slice_calls),
+                static_cast<double>(impl_->profile_slice_ns) / 1e6,
+                static_cast<double>(impl_->profile_native_ns) / 1e6,
+                static_cast<double>(impl_->profile_compile_ns) / 1e6,
+                static_cast<double>(impl_->profile_v5_emit_ns) / 1e6,
+                static_cast<unsigned long long>(impl_->profile_v5_compiles));
+    std::printf("BLOCK_PROFILE dispatch_returns missing=%llu generation=%llu "
+                "pending_delay=%llu host_boundary=%llu budget_no_progress=%llu "
+                "budget=%llu other=%llu entry_exceptions=%llu\n",
+                static_cast<unsigned long long>(impl_->dispatch_return_reasons[0]),
+                static_cast<unsigned long long>(impl_->dispatch_return_reasons[1]),
+                static_cast<unsigned long long>(impl_->dispatch_return_reasons[2]),
+                static_cast<unsigned long long>(impl_->dispatch_return_reasons[3]),
+                static_cast<unsigned long long>(impl_->dispatch_return_reasons[4]),
+                static_cast<unsigned long long>(impl_->dispatch_return_reasons[5]),
+                static_cast<unsigned long long>(impl_->dispatch_return_reasons[6]),
+                static_cast<unsigned long long>(impl_->entry_exceptions));
+    {
+      std::vector<std::pair<u32, u64>> pcs(impl_->pending_return_pcs.begin(),
+                                           impl_->pending_return_pcs.end());
+      std::sort(pcs.begin(), pcs.end(),
+                [](const auto &a, const auto &b) { return a.second > b.second; });
+      for (size_t i = 0; i < pcs.size() && i < 8u; ++i) {
+        u32 delay = 0u;
+        (void)cpu_.read_visible_instruction_for_backend(pcs[i].first + 4u, delay);
+        u32 branch = 0u;
+        (void)cpu_.read_visible_instruction_for_backend(pcs[i].first, branch);
+        const V4DispatchEntry *cell = impl_->dispatch_entry(pcs[i].first, false);
+        const V4Block *owner = cell != nullptr ? cell->block : nullptr;
+        std::printf("BLOCK_PROFILE   branch=%08X block_at_branch=%s\n", branch,
+                    owner != nullptr ? v5_profile_shape_name(owner->profile_shape)
+                                     : "none");
+        std::printf("BLOCK_PROFILE pending_delay_return branch_pc=%08X count=%llu "
+                    "delay=%08X\n",
+                    pcs[i].first, static_cast<unsigned long long>(pcs[i].second),
+                    delay);
+      }
+    }
+    std::printf("BLOCK_PROFILE compiles chain_new=%llu chain_inside=%llu "
+                "slice_start_new=%llu slice_start_inside=%llu\n",
+                static_cast<unsigned long long>(impl_->compile_reasons[0]),
+                static_cast<unsigned long long>(impl_->compile_reasons[1]),
+                static_cast<unsigned long long>(impl_->compile_reasons[2]),
+                static_cast<unsigned long long>(impl_->compile_reasons[3]));
+    std::printf("BLOCK_PROFILE chain_inside_after mem=%llu cop0=%llu jr=%llu "
+                "other=%llu\n",
+                static_cast<unsigned long long>(impl_->inside_after[0]),
+                static_cast<unsigned long long>(impl_->inside_after[1]),
+                static_cast<unsigned long long>(impl_->inside_after[2]),
+                static_cast<unsigned long long>(impl_->inside_after[3]));
+    std::printf("BLOCK_PROFILE live_blocks=%u distinct_ends=%zu "
+                "ends_with_1/2/3/4/5+_entries=%u/%u/%u/%u/%u "
+                "v5_hot_bytes=%llu v5_total_bytes=%llu\n",
+                live_blocks, per_end.size(), histogram[1], histogram[2],
+                histogram[3], histogram[4], histogram[5],
+                static_cast<unsigned long long>(g_v5_hot_bytes),
+                static_cast<unsigned long long>(g_v5_total_bytes));
+  }
+  {
+    // Hottest translations by dispatcher entries x instructions.
+    std::vector<const V4Block *> hot;
+    for (size_t i = 0; i < impl_->block_count; ++i) {
+      if (impl_->blocks[i].profile_entries != 0u) {
+        hot.push_back(&impl_->blocks[i]);
+      }
+    }
+    std::sort(hot.begin(), hot.end(), [](const V4Block *a, const V4Block *b) {
+      return a->profile_entries * a->instruction_count >
+             b->profile_entries * b->instruction_count;
+    });
+    for (size_t i = 0; i < hot.size() && i < 16u; ++i) {
+      const V4Block &block = *hot[i];
+      std::printf("BLOCK_PROFILE hot pc=%08X entries=%llu instructions=%u "
+                  "shape=%s code_bytes=%u\n",
+                  block.start_pc,
+                  static_cast<unsigned long long>(block.profile_entries),
+                  block.instruction_count,
+                  v5_profile_shape_name(block.profile_shape), block.code_size);
+    }
+  }
+  std::vector<std::pair<std::string, Row>> sorted(rows.begin(), rows.end());
+  std::sort(sorted.begin(), sorted.end(), [](const auto &a, const auto &b) {
+    return a.second.entries > b.second.entries;
+  });
+  std::printf("BLOCK_PROFILE entries=%llu instructions=%llu avg=%.2f "
+              "(dispatcher entries only; budget fragments excluded)\n",
+              static_cast<unsigned long long>(total_entries),
+              static_cast<unsigned long long>(total_instructions),
+              total_entries != 0u
+                  ? static_cast<double>(total_instructions) /
+                        static_cast<double>(total_entries)
+                  : 0.0);
+  for (size_t i = 0; i < sorted.size() && i < 40u; ++i) {
+    const Row &row = sorted[i].second;
+    std::printf("BLOCK_PROFILE %6.2f%% entries=%llu avg_instr=%.2f blocks=%llu %s\n",
+                total_entries != 0u ? 100.0 * static_cast<double>(row.entries) /
+                                          static_cast<double>(total_entries)
+                                    : 0.0,
+                static_cast<unsigned long long>(row.entries),
+                static_cast<double>(row.instructions) /
+                    static_cast<double>(row.entries),
+                static_cast<unsigned long long>(row.blocks),
+                sorted[i].first.c_str());
+  }
+  std::fflush(stdout);
+#endif
+}
 
 CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
                                              u32 max_instructions) {
@@ -9792,6 +12881,30 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     stats_.native_available = false;
     ++stats_.recompiler_frame_compile_failures;
     return result;
+  }
+  impl_->icache_line_stride = static_cast<u32>(sizeof(cpu_.icache_[0]));
+  struct SliceTimer {
+    Impl &impl;
+    std::chrono::steady_clock::time_point start;
+    ~SliceTimer() {
+      if (impl.block_profile) {
+        ++impl.profile_slice_calls;
+        impl.profile_slice_ns += static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - start)
+                .count());
+      }
+    }
+  } slice_timer{*impl_, impl_->block_profile
+                            ? std::chrono::steady_clock::now()
+                            : std::chrono::steady_clock::time_point{}};
+  if (impl_->translated_pgxp != g_pgxp_enabled) {
+    // V5 blocks compile PGXP hooks in or out; never mix the two.
+    impl_->translated_pgxp = g_pgxp_enabled;
+    impl_->reset_translations();
+    stats_.native_blocks = 0u;
+    stats_.block_count = 0u;
+    ++stats_.flushes;
   }
 
   const auto log_translation_reset = [&](const char *reason) {
@@ -9890,7 +13003,16 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
 
     cpu_.cycle_penalty_ = 0u;
     cpu_.executing_step_ = true;
+    const auto native_start = impl_->block_profile
+                                  ? std::chrono::steady_clock::now()
+                                  : std::chrono::steady_clock::time_point{};
     impl_->resident_dispatch(&native);
+    if (impl_->block_profile) {
+      impl_->profile_native_ns += static_cast<u64>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - native_start)
+              .count());
+    }
     cpu_.executing_step_ = false;
     ++stats_.native_chain_invocations;
     ++stats_.recompiler_frame_native_dispatches;
@@ -9934,8 +13056,6 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       cpu_.exception_return_sr_ = native.exception_return_sr;
       cpu_.exception_return_bd_ = false;
       cpu_.exception_return_valid_ = true;
-      cpu_.gte_result_ready_cycle_ = cpu_.cycles_;
-      cpu_.gte_input_ready_cycle_ = cpu_.cycles_;
     }
 
     result.instructions += native.instructions;
@@ -9947,9 +13067,11 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
   // stale. That instruction has architecturally started, so it retires in this
   // slice even past the budget, exactly like Cpu::step() after a refill.
   u32 started_refill_cycles = 0u;
+  u32 loop_iteration = 0u;
   while (started_refill_cycles != 0u ||
          (result.cycles < max_cycles &&
           result.instructions < max_instructions)) {
+    const u32 slice_iteration = loop_iteration++;
     // I-cache fills performed in C++ for a not-yet-compiled instruction are
     // architecturally part of that instruction's Cpu::step(). Keep them
     // uncommitted until native retirement so first-opcode MMIO sees the same
@@ -9984,6 +13106,9 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     if (irq_entry) {
       ++stats_.native_reject_irq_state;
       cpu_.execute_gte_before_interrupt();
+      if (impl_->block_profile) {
+        ++impl_->entry_exceptions;
+      }
       run_native_entry_exception(1u);
       continue;
     }
@@ -10102,6 +13227,9 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
             cpu_.instruction_cache_generation_for_backend(cpu_.pc_);
       }
 
+      if (impl_->block_profile) {
+        impl_->profile_compile_reason(cpu_.pc_, slice_iteration == 0u);
+      }
       const auto compile_start = std::chrono::steady_clock::now();
       block = impl_->compile_block(cpu_, stats_, cpu_.pc_, cacheable,
                                    icache_generation);
@@ -10112,6 +13240,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
                                std::chrono::nanoseconds>(compile_elapsed)
                                .count());
       stats_.recompiler_frame_compile_ns += compile_ns;
+      impl_->profile_compile_ns += compile_ns;
       stats_.recompiler_frame_compile_max_ns =
           std::max(stats_.recompiler_frame_compile_max_ns, compile_ns);
       ++stats_.recompiler_frame_compile_blocks;
@@ -10287,11 +13416,34 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
 
     cpu_.cycle_penalty_ = 0u;
     cpu_.executing_step_ = true;
+    const auto native_start = impl_->block_profile
+                                  ? std::chrono::steady_clock::now()
+                                  : std::chrono::steady_clock::time_point{};
     impl_->resident_dispatch(&native);
+    if (impl_->block_profile) {
+      impl_->profile_native_ns += static_cast<u64>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - native_start)
+              .count());
+    }
     cpu_.executing_step_ = false;
 
     ++stats_.native_chain_invocations;
     ++stats_.recompiler_frame_native_dispatches;
+    if (impl_->block_profile) {
+      // Why the resident chain came back to C++.
+      const u32 reason =
+          native.missing_exits != 0u      ? 0u
+          : native.generation_exits != 0u ? 1u
+          : native.pending_delay_slot != 0u ? 2u
+          : cpu_.sys_->cpu_timing_boundary_requested() ? 3u
+          : native.budget_exits != 0u      ? (native.instructions == 0u ? 4u : 5u)
+                                           : 6u;
+      ++impl_->dispatch_return_reasons[reason];
+      if (reason == 2u) {
+        ++impl_->pending_return_pcs[native.pending_branch_pc];
+      }
+    }
     stats_.native_direct_link_transitions += native.direct_links;
     stats_.recompiler_frame_direct_links += native.direct_links;
     stats_.native_dispatch_missing_exits += native.missing_exits;
@@ -10438,8 +13590,6 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       cpu_.exception_return_sr_ = native.exception_return_sr;
       cpu_.exception_return_bd_ = native.exception_return_bd != 0u;
       cpu_.exception_return_valid_ = true;
-      cpu_.gte_result_ready_cycle_ = cpu_.cycles_;
-      cpu_.gte_input_ready_cycle_ = cpu_.cycles_;
     }
 
     result.instructions += native.instructions;
@@ -10527,6 +13677,26 @@ void CpuRecompilerBackend::invalidate_range(u32 phys_or_normalized_addr,
 
 void CpuRecompilerBackend::begin_frame(u32 frame_index) {
   current_frame_ = frame_index;
+#if VIBESTATION_JIT_V4_X64
+  // VIBESTATION_BLOCK_PROFILE_FROM=<frame>: restart the timing/compile
+  // counters there, so a profile covers only the frames after a warmup.
+  static const long profile_from = [] {
+    const char *value = std::getenv("VIBESTATION_BLOCK_PROFILE_FROM");
+    return value != nullptr ? std::atol(value) : -1L;
+  }();
+  if (impl_->block_profile && static_cast<long>(frame_index) == profile_from) {
+    impl_->profile_native_ns = 0u;
+    impl_->profile_slice_calls = 0u;
+    impl_->profile_slice_ns = 0u;
+    impl_->profile_compile_ns = 0u;
+    impl_->profile_v5_emit_ns = 0u;
+    impl_->profile_v5_compiles = 0u;
+    impl_->compile_reasons = {};
+    impl_->inside_after = {};
+    impl_->dispatch_return_reasons = {};
+    impl_->entry_exceptions = 0u;
+  }
+#endif
   stats_.active =
       effective_cpu_execution_mode() == CpuExecutionMode::Recompiler;
 
@@ -10580,7 +13750,8 @@ CpuBackendStats CpuRecompilerBackend::stats() const {
 
 bool CpuRecompilerBackend::debug_code_ranges(uintptr_t &dispatcher_begin,
                                              uintptr_t &translations_begin,
-                                             uintptr_t &end) const {
+                                             uintptr_t &end,
+                                             uintptr_t *stubs_begin) const {
 #if VIBESTATION_JIT_V4_X64
   if (!impl_->initialized || !impl_->arena.available()) {
     return false;
@@ -10589,11 +13760,15 @@ bool CpuRecompilerBackend::debug_code_ranges(uintptr_t &dispatcher_begin,
   dispatcher_begin = base;
   translations_begin = base + impl_->permanent_code_bytes;
   end = base + impl_->arena.bytes_used();
+  if (stubs_begin != nullptr) {
+    *stubs_begin = base + impl_->stubs_offset;
+  }
   return true;
 #else
   (void)dispatcher_begin;
   (void)translations_begin;
   (void)end;
+  (void)stubs_begin;
   return false;
 #endif
 }

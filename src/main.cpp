@@ -1855,6 +1855,26 @@ static bool capture_benchmark_state_hashes(System &sys,
   out.cop0_timing = benchmark_hash_bytes(
       cpu_snapshot.data() + sizeof(CpuDebugState) + gte_state_size,
       cop0_timing_size);
+  if (std::getenv("VIBESTATION_BENCH_COP0_DUMP") != nullptr) {
+    // Field-level view of cop0_timing_hash for backend comparisons.
+    const u8 *tail = cpu_snapshot.data() + sizeof(CpuDebugState) +
+                     gte_state_size;
+    std::printf("CPU_BENCHMARK_COP0");
+    for (u32 r = 0; r < 32u; ++r) {
+      u32 value = 0;
+      std::memcpy(&value, tail + r * 4u, sizeof(value));
+      if (value != 0u) {
+        std::printf(" r%u=%08X", r, value);
+      }
+    }
+    u64 ready[3] = {};
+    std::memcpy(ready, tail + 128u, sizeof(ready));
+    std::printf(" gte_in=%llu gte_out=%llu muldiv=%llu cycles=%llu\n",
+                static_cast<unsigned long long>(ready[0]),
+                static_cast<unsigned long long>(ready[1]),
+                static_cast<unsigned long long>(ready[2]),
+                static_cast<unsigned long long>(final_cpu.cycles));
+  }
   out.cpu_cycles = final_cpu.cycles;
   out.display = sys.boot_diag().display_hash;
   out.pc = sys.cpu().pc();
@@ -2012,8 +2032,13 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
         auto_input_buttons_for_frame(absolute_frame));
     sys->run_frame(!lean);
     const auto &profile = sys->profiling_stats();
+    double frame_compile_ms = 0.0;
+    u64 frame_compiled_blocks = 0;
     if (requested_mode == CpuExecutionMode::Recompiler) {
       const CpuBackendStats frame_backend = sys->cpu().cpu_backend_stats();
+      frame_compile_ms =
+          static_cast<double>(frame_backend.recompiler_frame_compile_ns) / 1e6;
+      frame_compiled_blocks = frame_backend.recompiler_frame_compile_blocks;
       frame_revalidate_attempts +=
           frame_backend.recompiler_frame_revalidate_attempts;
       frame_revalidate_successes +=
@@ -2044,6 +2069,17 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
     gte_commands += profile.gte_total_commands;
     cpu_samples.push_back(profile.cpu_ms);
     core_samples.push_back(sys->profiling_stats().total_ms);
+    // VIBESTATION_BENCH_FRAMES=1: one line per measured frame, for finding
+    // which frames dominate the percentiles.
+    static const bool per_frame_log =
+        std::getenv("VIBESTATION_BENCH_FRAMES") != nullptr;
+    if (per_frame_log) {
+      std::printf("CPU_BENCHMARK_FRAME frame=%d cpu_ms=%.3f core_ms=%.3f "
+                  "gpu_ms=%.3f spu_ms=%.3f compile_ms=%.3f compiled=%llu\n",
+                  absolute_frame, profile.cpu_ms, profile.total_ms,
+                  profile.gpu_ms, profile.spu_ms, frame_compile_ms,
+                  static_cast<unsigned long long>(frame_compiled_blocks));
+    }
     if (!emit_checkpoint(absolute_frame)) {
       std::printf("CPU_BENCHMARK_RESULT status=error reason=checkpoint_capture\n");
       return 1;
@@ -2052,9 +2088,15 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
   const auto wall_end = std::chrono::steady_clock::now();
   if (sample_profiling) {
     std::vector<sample_profiler::CodeRange> ranges;
-    uintptr_t dispatcher = 0, translations = 0, code_end = 0;
-    if (sys->cpu().debug_jit_code_ranges(dispatcher, translations, code_end)) {
-      ranges.push_back({dispatcher, translations, "[V4 resident dispatcher]"});
+    uintptr_t dispatcher = 0, translations = 0, code_end = 0, stubs = 0;
+    if (sys->cpu().debug_jit_code_ranges(dispatcher, translations, code_end,
+                                         &stubs)) {
+      if (stubs > dispatcher && stubs < translations) {
+        ranges.push_back({dispatcher, stubs, "[V4 resident dispatcher]"});
+        ranges.push_back({stubs, translations, "[V5 shared stubs]"});
+      } else {
+        ranges.push_back({dispatcher, translations, "[V4 resident dispatcher]"});
+      }
       ranges.push_back({translations, code_end, "[V4 translated code]"});
     }
     sample_profiler::stop_and_report(stdout, 40, ranges);

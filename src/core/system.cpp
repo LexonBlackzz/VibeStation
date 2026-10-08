@@ -2973,8 +2973,11 @@ u8 System::read8(u32 addr) {
         if (io >= 0x040 && io < 0x050) {
             note_sio_io(phys);
             sync_sio_to_cpu();
-            cpu_timing_boundary_requested_ = true;
-            return sio_.read8(io - 0x040);
+            // A read can pop the RX FIFO or acknowledge; only a deadline that
+            // moves into the running slice needs a scheduler boundary.
+            const u8 value = sio_.read8(io - 0x040);
+            note_device_state_changed();
+            return value;
         }
         // SIO (serial port) - not used by most games, return open bus
         if (io >= 0x050 && io < 0x060) {
@@ -3083,8 +3086,11 @@ u16 System::read16(u32 addr) {
         if (io >= 0x040 && io < 0x050) {
             note_sio_io(phys);
             sync_sio_to_cpu();
-            cpu_timing_boundary_requested_ = true;
-            return sio_.read16(io - 0x040);
+            // A read can pop the RX FIFO or acknowledge; only a deadline that
+            // moves into the running slice needs a scheduler boundary.
+            const u16 value = sio_.read16(io - 0x040);
+            note_device_state_changed();
+            return value;
         }
         // SIO registers (0x1F801050-0x1F80105F) - not used by most games, return open bus
         if (io >= 0x050 && io < 0x060) {
@@ -3191,8 +3197,11 @@ u32 System::read32(u32 addr) {
         if (io >= 0x040 && io < 0x050) {
             note_sio_io(phys);
             sync_sio_to_cpu();
-            cpu_timing_boundary_requested_ = true;
-            return sio_.read32(io - 0x040);
+            // A read can pop the RX FIFO or acknowledge; only a deadline that
+            // moves into the running slice needs a scheduler boundary.
+            const u32 value = sio_.read32(io - 0x040);
+            note_device_state_changed();
+            return value;
         }
         // GPU
         if (io == 0x810)
