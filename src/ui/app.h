@@ -264,6 +264,9 @@ private:
 	bool disc_reaper_enabled_ = false;
 	float disc_reaper_start_seconds_ = 0.0f;
 	bool disc_reaper_use_custom_seed_ = false;
+	// FMV Reaper (Classic): corrupts movies inside the MDEC as they decode.
+	GrimFmvReaperConfig fmv_reaper_;
+	bool fmv_reaper_use_custom_seed_ = false;
 	// Auto-corrupt (Classic BIOS styles): re-corrupt with a new seed on a timer.
 	bool grim_auto_enabled_ = false;
 	float grim_auto_seconds_ = 15.0f;
@@ -406,6 +409,8 @@ private:
 	// path that boots, stops or swaps the BIOS goes back to an ordinary PlayStation.
 	void stop_all_corruption();
 	void sync_disc_reaper_config();
+	void sync_fmv_reaper_config();
+	void draw_fmv_reaper_tab();
 	void grim_auto_arm(int style);
 	void grim_auto_tick();
 	void draw_disc_reaper_tab();

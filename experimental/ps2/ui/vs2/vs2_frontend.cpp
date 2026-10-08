@@ -14,6 +14,7 @@ namespace {
 
 constexpr const char* kSettingsFile = "vibestation2.ini";
 constexpr float kRevealAt = 4.5f;      // vs2start.mp4 turns black here
+constexpr float kSkipCrossfadeSeconds = 0.8f; // boot animation fading over the menu after a skip
 constexpr float kStartingSeconds = 1.1f;
 constexpr float kHandoffSeconds = 1.2f;
 
@@ -231,6 +232,7 @@ void Frontend::frame() {
             default: break;
             }
         }
+        if (boot_crossfade_t0_ >= 0.0) draw_boot_crossfade(draw, layout);
         if (screen_ == Screen::Starting) {
             const float a = smoothstep(0.15f, 0.5f, static_cast<float>(now_ - screen_t0_));
             const char* label = "Starting BIOS...";
@@ -384,12 +386,14 @@ void Frontend::update_intro(const Input& in) {
     const double t = now_ - boot_t0_;
     const bool skip = in.accept || in.back || in.clicked;
     if (t >= kRevealAt || skip) {
-        // The boot sound plays on under the menu; skipping swaps it for the
-        // back-to-menu jingle.
+        // The boot sound plays on under the menu. A skip reveals the menu
+        // under the still-running boot animation, which fades away, and
+        // fades the boot sound out under the back-to-menu jingle.
         intro_pending_ = false;
         begin_reveal();
         if (t < kRevealAt) {
-            stop_boot_sound(); // also when menu sounds (and so the jingle) are off
+            boot_crossfade_t0_ = now_;
+            fade_out_boot_sound(1200.0f);
             play_back_to_menu_sound();
         }
         go(Screen::Home, true);
@@ -398,6 +402,25 @@ void Frontend::update_intro(const Input& in) {
 
 void Frontend::draw_intro(ImDrawList* draw, const Layout& layout) {
     boot_.draw(draw, layout, static_cast<float>(now_ - boot_t0_));
+}
+
+void Frontend::draw_boot_crossfade(ImDrawList* draw, const Layout& layout) {
+    const float k = static_cast<float>((now_ - boot_crossfade_t0_) / kSkipCrossfadeSeconds);
+    if (k >= 1.0f) {
+        boot_crossfade_t0_ = -1.0;
+        return;
+    }
+    // The animation blends additively, so scaling its vertex alpha fades its
+    // light out over the menu without darkening anything.
+    const float a = 1.0f - smoothstep(0.0f, 1.0f, k);
+    const int first = draw->VtxBuffer.Size;
+    boot_.draw(draw, layout, static_cast<float>(now_ - boot_t0_));
+    for (int i = first; i < draw->VtxBuffer.Size; ++i) {
+        ImU32& col = draw->VtxBuffer[i].col;
+        const ImU32 alpha = (col >> IM_COL32_A_SHIFT) & 0xFFu;
+        col = (col & ~IM_COL32_A_MASK) |
+              (static_cast<ImU32>(static_cast<float>(alpha) * a) << IM_COL32_A_SHIFT);
+    }
 }
 
 // ------------------------------------------------------------------ game

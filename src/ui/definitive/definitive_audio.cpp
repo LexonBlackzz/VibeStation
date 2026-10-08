@@ -198,6 +198,57 @@ bool convert_ui_sound(
     return true;
 }
 
+// Linear ramp from full volume to silence over the whole buffer. Returns
+// false for sample formats it does not handle.
+bool apply_ui_pcm_fade_out(
+    std::vector<Uint8>& pcm,
+    const SDL_AudioSpec& spec) {
+    const size_t channels = spec.channels;
+    const size_t bytes_per_sample =
+        static_cast<size_t>(SDL_AUDIO_BITSIZE(spec.format) / 8);
+    if (channels == 0 || bytes_per_sample == 0) {
+        return false;
+    }
+    const size_t frames = pcm.size() / (bytes_per_sample * channels);
+    const auto gain = [frames](size_t frame) {
+        return frames <= 1
+            ? 0.0f
+            : 1.0f - static_cast<float>(frame) / static_cast<float>(frames - 1);
+    };
+    switch (spec.format) {
+    case AUDIO_F32SYS: {
+        float* s = reinterpret_cast<float*>(pcm.data());
+        for (size_t i = 0; i < frames * channels; ++i) {
+            s[i] *= gain(i / channels);
+        }
+        return true;
+    }
+    case AUDIO_S16SYS: {
+        Sint16* s = reinterpret_cast<Sint16*>(pcm.data());
+        for (size_t i = 0; i < frames * channels; ++i) {
+            s[i] = static_cast<Sint16>(static_cast<float>(s[i]) * gain(i / channels));
+        }
+        return true;
+    }
+    case AUDIO_S32SYS: {
+        Sint32* s = reinterpret_cast<Sint32*>(pcm.data());
+        for (size_t i = 0; i < frames * channels; ++i) {
+            s[i] = static_cast<Sint32>(static_cast<double>(s[i]) * gain(i / channels));
+        }
+        return true;
+    }
+    case AUDIO_U8: {
+        for (size_t i = 0; i < frames * channels; ++i) {
+            const float centred = static_cast<float>(pcm[i]) - 128.0f;
+            pcm[i] = static_cast<Uint8>(128.0f + centred * gain(i / channels));
+        }
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
 void apply_ui_sound_fade_in(
     UiSoundClip& clip,
     const SDL_AudioSpec& spec,
@@ -641,6 +692,49 @@ void play_startup_sound() {
 void skip_startup_sound() {
     stop_startup_sound();
     g_launcher_startup_sound_played = true;
+}
+
+void fade_out_startup_sound(float fade_ms) {
+    if (!g_launcher_startup_sound_played ||
+        g_ui_sound_device == 0 ||
+        g_ui_logo_sound.pcm.empty()) {
+        return;
+    }
+    const int bits = SDL_AUDIO_BITSIZE(g_ui_sound_spec.format);
+    const size_t bytes_per_frame =
+        static_cast<size_t>(bits / 8) *
+        static_cast<size_t>(g_ui_sound_spec.channels);
+    const size_t total = g_ui_logo_sound.pcm.size();
+    const size_t queued = std::min<size_t>(
+        SDL_GetQueuedAudioSize(g_ui_sound_device), total);
+    if (bytes_per_frame == 0 || queued < bytes_per_frame) {
+        return;
+    }
+
+    // The queue holds the part of the clip still to play: replace it with
+    // its next fade_ms, ramped down to silence.
+    const size_t position =
+        (total - queued) / bytes_per_frame * bytes_per_frame;
+    const size_t fade_frames = std::max<size_t>(
+        1u,
+        static_cast<size_t>(
+            static_cast<float>(g_ui_sound_spec.freq) * fade_ms / 1000.0f));
+    const size_t length = std::min(
+        (total - position) / bytes_per_frame * bytes_per_frame,
+        fade_frames * bytes_per_frame);
+    std::vector<Uint8> tail(
+        g_ui_logo_sound.pcm.begin() + static_cast<std::ptrdiff_t>(position),
+        g_ui_logo_sound.pcm.begin() +
+            static_cast<std::ptrdiff_t>(position + length));
+    if (!apply_ui_pcm_fade_out(tail, g_ui_sound_spec)) {
+        stop_startup_sound();
+        return;
+    }
+    SDL_ClearQueuedAudio(g_ui_sound_device);
+    SDL_QueueAudio(
+        g_ui_sound_device, tail.data(), static_cast<Uint32>(tail.size()));
+    g_ui_action_sound_until_ms =
+        SDL_GetTicks() + static_cast<Uint32>(fade_ms);
 }
 
 void stop_startup_sound() {

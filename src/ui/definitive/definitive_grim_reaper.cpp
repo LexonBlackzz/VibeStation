@@ -17,25 +17,28 @@ namespace {
 
 using namespace definitive_ui;
 
-constexpr std::array<const char*, 6> kReaperStyleNames = {{
+constexpr std::array<const char*, 7> kReaperStyleNames = {{
     "BIOS Corruption",
     "Batch BIOS",
     "RAM Reaper",
     "GPU Reaper",
     "Sound Reaper",
     "Disc Reaper",
+    "FMV Reaper",
 }};
 
-constexpr std::array<const char*, 6> kReaperStyleSubtitles = {{
+constexpr std::array<const char*, 7> kReaperStyleSubtitles = {{
     "Corrupt one BIOS region and reboot",
     "Corrupt multiple BIOS regions together",
     "Real-time RAM, VRAM and SPU RAM corruption",
     "Real-time geometry, texture and display corruption",
     "Real-time pitch, ADSR, reverb and mixer corruption",
     "Corrupt game data as the CD drive reads it",
+    "Real-time movie corruption as the MDEC decodes it",
 }};
 
 constexpr int kDiscReaperStyle = 5;
+constexpr int kFmvReaperStyle = 6;
 
 const char* short_bios_target_name(int index) {
     switch (index) {
@@ -760,8 +763,12 @@ void App::panel_definitive_grim_reaper() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    if (style == kDiscReaperStyle) {
-        draw_disc_reaper_tab();
+    if (style == kDiscReaperStyle || style == kFmvReaperStyle) {
+        if (style == kDiscReaperStyle) {
+            draw_disc_reaper_tab();
+        } else {
+            draw_fmv_reaper_tab();
+        }
         ImGui::Spacing();
         if (ImGui::Button(
                 has_started_emulation_
@@ -1906,5 +1913,63 @@ void App::draw_disc_reaper_tab() {
             ImGui::TextDisabled("Boot program: %s%s", boot.c_str(),
                 (d.targets & kGrimDiscBootCode) != 0 ? " (targeted)" : " (protected)");
         }
+    }
+}
+
+void App::draw_fmv_reaper_tab() {
+    GrimFmvReaperConfig& f = fmv_reaper_;
+
+    ImGui::TextUnformatted("TARGETS");
+    ImGui::CheckboxFlags("Coefficients (smears, blotches, ringing)", &f.targets, kGrimFmvCoeffs);
+    ImGui::CheckboxFlags("Blocks (swapped, repeated, dead and torn tiles)", &f.targets, kGrimFmvBlocks);
+    ImGui::CheckboxFlags("Pixels (bit rot and colour noise)", &f.targets, kGrimFmvPixels);
+    ImGui::CheckboxFlags("Quantisation tables (the whole movie turns)", &f.targets, kGrimFmvQuant);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Games upload these when a movie starts, so this lasts until the next one.\n"
+                          "It ignores the macroblock share and uses the strength alone.");
+    }
+    ImGui::CheckboxFlags("Movie audio (stutters, skips, crushes, blasts)", &f.targets, kGrimFmvAudio);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("The movie's XA sound, damaged as it decodes: the same share of audio\n"
+                          "sectors as of macroblocks. Music and voices outside movies stay clean.");
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped("The amount of video data is never changed, so movies break but never stall.");
+    ImGui::PopStyleColor();
+
+    ImGui::Spacing();
+    ImGui::TextUnformatted("AMOUNT");
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::SliderFloat("##fmv_percent", &f.percent, 0.1f, 100.0f, "%.1f%% of macroblocks",
+        ImGuiSliderFlags_Logarithmic);
+    ImGui::TextUnformatted("STRENGTH");
+    int strength = static_cast<int>(f.strength);
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::SliderInt("##fmv_strength", &strength, 1, 1024,
+            strength < 256 ? "%d  (scratched)" : strength < 640 ? "%d  (broken)" : "%d  (possessed)")) {
+        f.strength = static_cast<u32>(std::clamp(strength, 1, 1024));
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    if (ImGui::Checkbox("Corrupt movies", &f.enabled) && f.enabled && !fmv_reaper_use_custom_seed_) {
+        f.seed = (static_cast<u64>(std::random_device{}()) << 32) ^ std::random_device{}();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("On or off while playing: takes effect from the next frame.");
+    }
+    ImGui::Checkbox("Use custom seed##fmv", &fmv_reaper_use_custom_seed_);
+    if (fmv_reaper_use_custom_seed_) {
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputScalar("##fmv_seed", ImGuiDataType_U64, &f.seed);
+    }
+    sync_fmv_reaper_config();
+
+    if (system_ != nullptr && f.enabled) {
+        ImGui::TextDisabled("Seed: %llu  |  Macroblocks corrupted: %llu",
+            static_cast<unsigned long long>(f.seed),
+            static_cast<unsigned long long>(system_->fmv_reaper_hits()));
     }
 }

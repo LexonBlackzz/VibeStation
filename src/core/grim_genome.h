@@ -44,6 +44,21 @@ struct GrimRng {
   u32 unit_q10() { return static_cast<u32>(next() >> 54); }
 };
 
+// FMV corruption settings and per-macroblock state (the engine is grim_fmv.h).
+// rate: share of macroblocks hit, permille. strength: how hard each hit is, 0..1024.
+// Quantisation tables ignore rate (they are uploaded rarely) and use strength alone.
+struct GrimFmvKnobs {
+  u32 targets = 0; // GrimFmvTarget mask
+  u32 rate = 0;
+  u32 strength = 0;
+};
+// One macroblock's decision, drawn once when its decoding starts.
+struct GrimFmvMacroblock {
+  bool hit = false;
+  u64 r = 0; // per-macroblock randomness; individual edits are mixed from it
+  u32 n = 0; // edits so far (salt for the next one)
+};
+
 // Stateless mix of a value (the splitmix64 finalizer), for per-bit / per-vertex
 // decisions derived from one event draw without advancing the stream.
 inline u64 grim_mix64(u64 x) {
@@ -80,6 +95,9 @@ enum class GrimGeneType : u8 {
   HwRam,
   HwVram,
   HwSpuRam,
+  // Full-motion video corrupted inside the MDEC (grim_fmv.h). target = GrimFmvTarget
+  // mask; params rate (permille of macroblocks) and strength (0..1024).
+  MdecFmv,
   Count
 };
 
@@ -197,6 +215,8 @@ struct GrimRandomParams {
   u32 horizon_frames = 1800; // window/rot frames are drawn from [0, horizon]
   bool spu = true;
   bool gpu = true;
+  // FMV genes (mdec_fmv). Off by default, so earlier seeds draw exactly as before.
+  bool fmv = false;
   // Phase 3: with `rom` set, between rom_genes_min and rom_genes_max ROM genes
   // of up to rom_patches_max patches each are added (from a separate random
   // stream, so the interface part of a genome does not depend on this).
@@ -313,6 +333,17 @@ public:
   // gouraud polyline. Terminators pass through unchanged.
   u32 filter_gp0_polyline_word(u32 word, bool gouraud, bool color_word);
 
+  // ---- MDEC ----
+  // FMV genes, called by the MDEC through System (see GrimFmvHook in grim_fmv.h).
+  bool has_fmv() const { return !fmv_genes_.empty(); }
+  void fmv_begin_macroblock();
+  u16 fmv_coefficient(u16 halfword);
+  void fmv_quant_table(u8 *table, size_t n);
+  void fmv_blocks(int *blocks, size_t count);
+  u32 fmv_output_word(u32 word);
+  // One decoded XA sector of the movie's audio (interleaved stereo), in place.
+  void fmv_audio(s16 *lr, size_t frames);
+
   // Number of events each gene actually changed (same order as the genome).
   const std::vector<u64> &hits() const { return hits_; }
 
@@ -349,6 +380,14 @@ private:
   std::vector<GrimRng> rng_;
   std::vector<u64> hits_;
   std::vector<size_t> spu_genes_, gpu_genes_; // indices into genome_.genes
+  std::vector<size_t> fmv_genes_;             // indices into genome_.genes
+  // Per FMV gene: this macroblock's decision and the trigger-scaled settings.
+  struct FmvState {
+    GrimFmvKnobs knobs;
+    GrimFmvMacroblock mb;
+    std::vector<s16> audio_last; // previous clean XA sector (skip-backs replay it)
+  };
+  std::vector<FmvState> fmv_state_;
   struct HwCell {
     u32 where; // RAM/SPU byte offset, or VRAM word index
     u16 mask;  // bits that fail

@@ -31,7 +31,7 @@ std::string grim_pull_readout(u32 intensity) {
 u32 grim_pull_available_families(const GrimPullContext &ctx) {
   // SPU and GP0 filters and hardware faults need nothing but a running machine;
   // without a sound-bank scan, Audio is SPU filters only.
-  u32 m = kGrimFamilyAudio | kGrimFamilyVisual | kGrimFamilyHardware;
+  u32 m = kGrimFamilyAudio | kGrimFamilyVisual | kGrimFamilyHardware | kGrimFamilyFmv;
   if (ctx.rom != nullptr) {
     m |= kGrimFamilyCode;
   }
@@ -54,6 +54,7 @@ u32 grim_gene_family(GrimGeneType t) {
   case GrimGeneType::HwRam:
   case GrimGeneType::HwVram:
   case GrimGeneType::HwSpuRam: return kGrimFamilyHardware;
+  case GrimGeneType::MdecFmv: return kGrimFamilyFmv;
   default: return kGrimFamilyVisual;
   }
 }
@@ -96,6 +97,7 @@ const char *iface_title(GrimGeneType t) {
   case GrimGeneType::GpuTexParam: return "Texture slip";
   case GrimGeneType::GpuState: return "Draw state glitch";
   case GrimGeneType::GpuFill: return "Fill glitch";
+  case GrimGeneType::MdecFmv: return "Movie rot";
   default: return grim_gene_type_name(t);
   }
 }
@@ -173,6 +175,7 @@ GrimGenome generate_one(u64 seed, const GrimPullSettings &settings, const GrimPu
   if (enabled & kGrimFamilyVisual) slots.push_back({kGrimFamilyVisual, 3});
   if (enabled & kGrimFamilyCode) slots.push_back({kGrimFamilyCode, 3});
   if (enabled & kGrimFamilyHardware) slots.push_back({kGrimFamilyHardware, 3});
+  if (enabled & kGrimFamilyFmv) slots.push_back({kGrimFamilyFmv, 2});
   if (slots.empty()) {
     return out;
   }
@@ -181,7 +184,7 @@ GrimGenome generate_one(u64 seed, const GrimPullSettings &settings, const GrimPu
 
   GrimRng pick{seed ^ 0x5851F42D4C957F2Dull};
   const u32 n = pick.range(plan.min_genes, plan.max_genes);
-  u32 count_spu = 0, count_gpu = 0, count_sample = 0, count_code = 0, count_hw = 0;
+  u32 count_spu = 0, count_gpu = 0, count_sample = 0, count_code = 0, count_hw = 0, count_fmv = 0;
   for (u32 i = 0; i < n; ++i) {
     u32 w = pick.range(0, total - 1);
     for (const Slot &s : slots) {
@@ -190,7 +193,10 @@ GrimGenome generate_one(u64 seed, const GrimPullSettings &settings, const GrimPu
           // Half of the audio genes rot the sound bank itself, when it was scanned.
           (ctx.sample != nullptr && pick.range(0, 1) == 0 ? count_sample : count_spu)++;
         } else {
-          (s.family == kGrimFamilyVisual ? count_gpu : s.family == kGrimFamilyCode ? count_code : count_hw)++;
+          (s.family == kGrimFamilyVisual ? count_gpu
+           : s.family == kGrimFamilyCode ? count_code
+           : s.family == kGrimFamilyFmv  ? count_fmv
+                                         : count_hw)++;
         }
         break;
       }
@@ -213,6 +219,16 @@ GrimGenome generate_one(u64 seed, const GrimPullSettings &settings, const GrimPu
   }
   if (count_gpu > 0) {
     add_interface(count_gpu, false, 6u);
+  }
+  if (count_fmv > 0) {
+    GrimRandomParams p;
+    p.spu = p.gpu = false;
+    p.fmv = true;
+    p.min_genes = p.max_genes = count_fmv;
+    p.risk_q10 = plan.risk_q10;
+    p.rot_only = settings.rot;
+    const GrimGenome g = grim_random_genome(grim_mix64(seed ^ 7u), p);
+    out.genes.insert(out.genes.end(), g.genes.begin(), g.genes.end());
   }
   if (count_sample > 0) {
     GrimRandomParams p;
@@ -360,6 +376,18 @@ std::vector<GrimGeneLine> grim_pull_describe(const GrimGenome &genome,
     } else {
       l.title = iface_title(g.type);
       l.detail = trigger_text(g.trigger, ctx.frame_rate);
+      if (g.type == GrimGeneType::MdecFmv) {
+        static const char *const kParts[] = {"coefficients", "quant tables", "blocks", "pixels", "audio"};
+        std::string parts;
+        for (u32 i = 0; i < 5; ++i) {
+          if ((g.target >> i) & 1u) {
+            parts += parts.empty() ? kParts[i] : std::string(" + ") + kParts[i];
+          }
+        }
+        std::snprintf(b, sizeof(b), "%s \xC2\xB7 %d%% of macroblocks \xC2\xB7 ", parts.c_str(),
+                      (g.params[0] + 5) / 10);
+        l.detail = b + l.detail;
+      }
     }
     lines.push_back(std::move(l));
   }

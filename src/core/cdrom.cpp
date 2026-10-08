@@ -1379,6 +1379,7 @@ void CdRom::maybe_decode_xa_audio(const std::vector<u8> &raw_sector,
       xa_hist2_[1] = xa_hist2_[0];
     }
 
+    sys_->grim_fmv_xa_audio(samples);
     apply_host_audio_matrix(samples);
     sys_->push_cd_audio_samples(samples, sample_rate);
   }

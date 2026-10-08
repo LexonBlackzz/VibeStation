@@ -311,3 +311,50 @@ Either way, VibeStation remains far behind a mature emulator.
 This patch removes a game-breaking recompiler corruption and most measured
 interpreter dependence. The evidence now points at dispatch/state traffic, event
 scheduling, and rendering as the work that can close the remaining gap.
+
+## Results after V5 mixed blocks (2026-10)
+
+V5 compiles whole guest basic blocks (ALU, loads/stores, HI/LO, mult/div,
+overflow ops, COP2 and LWC2/SWC2, branches with delay slots) into one native
+body with shared stubs for exits, exceptions, device I/O and I-cache line
+refills. Blocks link directly (`linked_fn`), self-loops jump back in place,
+`JR` looks up its target cell inline, and two-block loops are fused. Every
+instruction checks the cycle budget, so event exits stay exact; there is no
+interpreter or C++ semantic fallback in Recompiler mode.
+
+Measured with the Release `/Zi` build, median of three runs, CPU ms per frame
+(GPU excluded). Every row has matching `cpu_state_hash`, `ram_hash` and
+display hashes against the interpreter at all checkpoints.
+
+| Workload | Recompiler | Interpreter | Guest instr / block entry |
+| --- | ---: | ---: | ---: |
+| GT2 boot, 300 frames | 0.698 | 7.256 | 9.24 |
+| GT2, 1,200 frames with input | 0.676 | 8.107 | |
+| Crash, 1,200 frames | 0.778 | 7.956 | |
+| Crash, 1,200 frames, PGXP | 1.283 | 8.071 | |
+| Crash in-game (600 frames after 3,000 warm-up) | 1.833 (p95 2.404) | ~10.3 | 10.74 |
+| Tekken, 1,800 frames | 0.953 | 9.174 | |
+| FF7, 1,800 frames | 1.670 | 8.465 | |
+| Silent Hill, 1,800 frames | 0.809 | 7.667 | |
+
+Against the gates above: native coverage is 100%, block entries average more
+than eight guest instructions, the differential suite passes (including a new
+cold delay-slot device-load timestamp case), and GT2 is about 21x faster than
+the 15.29 ms interpreter baseline in this document (about 10x faster than
+today's interpreter).
+
+Fixes found along the way:
+
+- The chain exit overwrote the GTE ready cycles with `cpu_.cycles_`, which
+  changed `cpu_state_hash`. Exceptions now anchor the GTE scoreboard instead.
+- Refilling a load/store delay-slot line inside the block lost the pre-fetch
+  timestamp when the device access yielded. Those lines no longer refill
+  in-block.
+- SIO/PAD reads now call `note_device_state_changed()` instead of always
+  requesting a timing boundary. Interpreter hashes are unchanged.
+
+Superblocks (`VIBESTATION_V5_SUPERBLOCK=1`) are still opt-in because they
+measured slower. Diagnostics: `VIBESTATION_V5_DISABLE`,
+`VIBESTATION_V5_NO_LOOP_FUSION`, `VIBESTATION_BLOCK_PROFILE`,
+`VIBESTATION_V5_DUMP`/`VIBESTATION_V5_DUMP_PC`, and the per-frame
+`VIBESTATION_BENCH_FRAMES` output.

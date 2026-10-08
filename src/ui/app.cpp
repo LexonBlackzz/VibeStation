@@ -1,5 +1,6 @@
 #include "app.h"
 #include "core/grim_genome.h"
+#include "ui/definitive/definitive_shared.h"
 #include "ui/host_window.h"
 #include "platform/disc_path_utils.h"
 #include "platform/memory_card_utils.h"
@@ -747,6 +748,9 @@ void App::process_events(bool& quit) {
             if (scancode == SDL_SCANCODE_ESCAPE) {
                 status_message_ = "Keyboard rebinding canceled";
             }
+            else if (scancode == InputManager::kTurboKey) {
+                status_message_ = "Backspace is reserved for fast forward";
+            }
             else {
                 input_->set_key_binding(scancode, kKeyboardBindEntries[bind_index].button);
                 save_persistent_config();
@@ -983,6 +987,7 @@ void App::update() {
     sync_gpu_reaper_config();
     sync_sound_reaper_config();
     sync_disc_reaper_config();
+    sync_fmv_reaper_config();
     grim_auto_tick();
     if (g_cli_open_grim_reaper) {
         g_cli_open_grim_reaper = false;
@@ -1217,6 +1222,8 @@ void App::render_ui() {
     ImGui::PopStyleVar(3);
 
     if (has_started_emulation_) {
+        // The launcher TV's ambience does not follow the player into a game.
+        definitive_ui::stop_tv_glitch_sound(true);
         panel_emulator_screen();
     }
     else {
