@@ -2091,6 +2091,7 @@ void App::save_persistent_config() const {
     out.gpu_fast_mode = g_gpu_fast_mode;
     out.gpu_extreme_fast_mode = g_gpu_extreme_fast_mode;
     out.pgxp_enabled = g_pgxp_enabled;
+    out.modchip_enabled = g_modchip_enabled;
     out.gpu_upscale = g_gpu_upscale;
     out.gpu_true_color = g_gpu_true_color;
     out.gpu_texture_filter = g_gpu_texture_filter;

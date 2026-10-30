@@ -33,6 +33,8 @@ public:
   u32 mapped_size() const { return mapped_size_; }
 
   const std::string &get_info() const { return info_; }
+  // Console region from the ROM version string: 'A' (US), 'E' (Europe), 'J' (Japan).
+  char region() const { return region_; }
 
 private:
   std::vector<u8> data_{};
@@ -41,6 +43,7 @@ private:
   bool fast_boot_patched_ = false;
   bool image_patched_ = false;
   std::string info_;
+  char region_ = 'A';
   u32 mapped_size_ = psx::BIOS_SIZE;
 
   void identify();

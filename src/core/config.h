@@ -19,6 +19,7 @@ struct Config {
     bool gpu_fast_mode = false;
     bool gpu_extreme_fast_mode = false;
     bool pgxp_enabled = false;
+    bool modchip_enabled = true;
     int gpu_upscale = 0;
     bool gpu_true_color = true;
     bool gpu_texture_filter = false;

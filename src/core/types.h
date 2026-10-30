@@ -123,6 +123,9 @@ inline bool g_gpu_fast_mode = false;
 inline bool g_gpu_extreme_fast_mode = false;
 // PGXP: sub-pixel GTE vertices + perspective-correct texturing (cosmetic).
 inline bool g_pgxp_enabled = false;
+// Emulated modchip: the CD controller reports any non-audio disc as licensed for the
+// console's own region (boots CD-Rs, foreign discs). Off = a stock console.
+inline bool g_modchip_enabled = true;
 // OpenGL upscaler internal resolution multiplier; 0 = software output only.
 inline int g_gpu_upscale = 0;
 // Upscaler enhancements (OpenGL output only).

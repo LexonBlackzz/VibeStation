@@ -262,6 +262,12 @@ void Bios::identify() {
   }
 
   if (!best_ver.empty()) {
+    if (best_ver.find('/') != std::string::npos) {
+      const char r = best_ver.back(); // "2.2 12/04/95 A"
+      if (r == 'A' || r == 'E' || r == 'J') {
+        region_ = r;
+      }
+    }
     if (best_ver.find("2.2 12/04/95 A") != std::string::npos) {
       info_ = "SCPH-1001 compatible (ROM " + best_ver + ")";
     } else {

@@ -128,6 +128,7 @@ Config Config::load(const std::string& path) {
     get_bool("gpu_fast_mode", cfg.gpu_fast_mode);
     get_bool("gpu_extreme_fast_mode", cfg.gpu_extreme_fast_mode);
     get_bool("pgxp_enabled", cfg.pgxp_enabled);
+    get_bool("modchip_enabled", cfg.modchip_enabled);
     if (j.contains("gpu_upscale") && j["gpu_upscale"].is_number_integer()) {
         cfg.gpu_upscale = std::clamp(j["gpu_upscale"].get<int>(), 0, 8);
     }
@@ -342,6 +343,7 @@ void Config::save(const std::string& path) const {
     j["gpu_fast_mode"] = gpu_fast_mode;
     j["gpu_extreme_fast_mode"] = gpu_fast_mode && gpu_extreme_fast_mode;
     j["pgxp_enabled"] = pgxp_enabled;
+    j["modchip_enabled"] = modchip_enabled;
     j["gpu_upscale"] = gpu_upscale;
     j["gpu_true_color"] = gpu_true_color;
     j["gpu_texture_filter"] = gpu_texture_filter;
@@ -462,6 +464,7 @@ void Config::apply_to_globals() const {
     g_gpu_fast_mode = gpu_fast_mode;
     g_gpu_extreme_fast_mode = gpu_extreme_fast_mode;
     g_pgxp_enabled = pgxp_enabled;
+    g_modchip_enabled = modchip_enabled;
     g_gpu_upscale = gpu_upscale;
     g_gpu_true_color = gpu_true_color;
     g_gpu_texture_filter = gpu_texture_filter;

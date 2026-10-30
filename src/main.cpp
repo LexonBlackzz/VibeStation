@@ -4013,6 +4013,10 @@ int main(int argc, char *argv[]) {
       g_spu_enable_slowdown_stutter = true;
       continue;
     }
+    if (a == "--no-modchip") {
+      g_modchip_enabled = false;
+      continue;
+    }
     if (a == "--no-slowdown-stutter") {
       g_spu_enable_slowdown_stutter = false;
       continue;

@@ -1064,7 +1064,7 @@ void App::panel_definitive_settings() {
 
     case 5: { // Experimental
         draw_settings_section(
-            draw, layout, left_x, content_y, 1012.0f, 326.0f, "EXPERIMENTAL");
+            draw, layout, left_x, content_y, 1012.0f, 394.0f, "EXPERIMENTAL");
 
         if (definitive_settings_switch(
             draw, layout, "experimental_bios_size", "Experimental BIOS Size Mode",
@@ -1104,6 +1104,15 @@ void App::panel_definitive_settings() {
         }
         note(left_x + 1.0f, content_y + 43.0f + row_step * 3.0f,
             "Coerces malformed DMA channel commands into legal transfer commands.");
+
+        if (definitive_settings_switch(
+            draw, layout, "experimental_modchip", "Modchip (Boot Any Disc)",
+            left_x + 1.0f, content_y + 43.0f + row_step * 4.0f, 1010.0f,
+            g_modchip_enabled)) {
+            save_persistent_config();
+        }
+        note(left_x + 1.0f, content_y + 43.0f + row_step * 4.0f,
+            "Passes the disc check for any disc, using the console's region. Off acts like a stock console.");
         break;
     }
 

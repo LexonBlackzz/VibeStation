@@ -317,6 +317,31 @@ bool is_probable_str_video_sector(const std::vector<u8> &raw_sector) {
   return false;
 }
 
+// Region of the Sony license text in a sector ('A', 'E', 'I'), 0 if there is none.
+// The strings are padded with spaces: "Licensed  by  Sony ... Entertainment  Amer  ica".
+char license_region_in(const std::vector<u8> &raw_sector) {
+  const std::string_view s(reinterpret_cast<const char *>(raw_sector.data()),
+                           raw_sector.size());
+  constexpr std::string_view kWord = "Entertainment";
+  const size_t at = s.find("Licensed") == std::string_view::npos
+                        ? std::string_view::npos
+                        : s.find(kWord);
+  if (at == std::string_view::npos) {
+    return 0;
+  }
+  size_t i = at + kWord.size();
+  while (i < s.size() && s[i] == ' ') {
+    ++i;
+  }
+  if (s.compare(i, 4, "Amer") == 0) {
+    return 'A';
+  }
+  if (s.compare(i, 4, "Euro") == 0) {
+    return 'E';
+  }
+  return s.compare(i, 3, "Inc") == 0 ? 'I' : 0;
+}
+
 std::vector<u8> make_error_response(u8 stat, u8 error_code) {
   return {static_cast<u8>(stat | 0x01u), error_code};
 }
@@ -2282,13 +2307,30 @@ void CdRom::cmd_getid() {
     schedule_second_response(33868, 5,
                              {static_cast<u8>(stat_byte() | 0x01u), 0x90u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u});
   } else {
+    // Modchip: the console's own region for any disc. Stock console: the region
+    // of the disc's license text (stand-in for the wobble signal), else unlicensed.
+    char region = 'A';
+    if (sys_ != nullptr) {
+      region = sys_->bios().region() == 'J' ? 'I' : sys_->bios().region();
+    }
+    if (!g_modchip_enabled) {
+      std::vector<u8> raw;
+      region = read_raw_sector_for_lba(4, raw) ? license_region_in(raw) : 0;
+    }
+    if (region == 0) {
+      id_error_ = true;
+      schedule_second_response(33868, 5,
+                               {static_cast<u8>(stat_byte() | 0x01u), 0x80u, 0x20u,
+                                0x00u, 0x00u, 0x00u, 0x00u, 0x00u});
+      return;
+    }
     id_error_ = false;
     schedule_second_response(33868, 2,
                              {stat_byte(), 0x00u, 0x20u, 0x00u,
                               static_cast<u8>('S'), static_cast<u8>('C'),
-                              static_cast<u8>('E'), static_cast<u8>('A')});
+                              static_cast<u8>('E'), static_cast<u8>(region)});
     if (g_trace_cdrom) {
-      LOG_INFO("CDROM: GetID queued region=SCEA type=0x20");
+      LOG_INFO("CDROM: GetID queued region=SCE%c type=0x20", region);
     }
   }
 }
