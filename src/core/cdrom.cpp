@@ -499,6 +499,29 @@ void CdRom::reset() {
   id_error_ = false;
 }
 
+namespace {
+
+// Track for an image given without a cue sheet. A size that only divides by 2048
+// is a cooked data dump (.iso); anything else is a raw 2352-byte image.
+CdTrack make_cueless_track(const std::string &filename) {
+  CdTrack track;
+  track.number = 1;
+  track.type = "MODE2/2352";
+  track.filename = filename;
+  track.sector_size = 2352;
+  track.index01_file_lba = 0;
+  track.index01_abs_lba = 150;
+  track.index01_file_offset = 0;
+  const u64 bytes = file_size_bytes(filename);
+  if (bytes != 0 && bytes % 2352u != 0 && bytes % 2048u == 0) {
+    track.type = "MODE1/2048";
+    track.sector_size = 2048;
+  }
+  return track;
+}
+
+} // namespace
+
 bool CdRom::load_bin_cue(const std::string &bin_path,
                          const std::string &cue_path) {
   if (bin_file_.is_open()) {
@@ -536,22 +559,7 @@ bool CdRom::load_bin_cue(const std::string &bin_path,
   }
 
   if (tracks_.empty()) {
-    CdTrack track;
-    track.number = 1;
-    track.type = "MODE2/2352";
-    track.filename = bin_fs.string();
-    track.sector_size = 2352;
-    // Cue-less image (.iso/.img/...): a size that only divides by 2048 is a
-    // cooked data-only dump.
-    const u64 raw_bytes = file_size_bytes(bin_fs.string());
-    if (raw_bytes != 0 && raw_bytes % 2352u != 0 && raw_bytes % 2048u == 0) {
-      track.type = "MODE1/2048";
-      track.sector_size = 2048;
-    }
-    track.index01_file_lba = 0;
-    track.index01_abs_lba = 150;
-    track.index01_file_offset = 0;
-    tracks_.push_back(track);
+    tracks_.push_back(make_cueless_track(bin_fs.string()));
   }
 
   std::string layout_error;
@@ -647,15 +655,7 @@ bool CdRom::swap_disc_image(const std::string &bin_path,
   }
 
   if (parsed_tracks.empty()) {
-    CdTrack track;
-    track.number = 1;
-    track.type = "MODE2/2352";
-    track.filename = bin_fs.string();
-    track.sector_size = 2352;
-    track.index01_file_lba = 0;
-    track.index01_abs_lba = 150;
-    track.index01_file_offset = 0;
-    parsed_tracks.push_back(track);
+    parsed_tracks.push_back(make_cueless_track(bin_fs.string()));
   }
 
   std::string layout_error;
