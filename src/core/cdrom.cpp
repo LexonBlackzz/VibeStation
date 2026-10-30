@@ -516,6 +516,13 @@ bool CdRom::load_bin_cue(const std::string &bin_path,
     track.type = "MODE2/2352";
     track.filename = bin_fs.string();
     track.sector_size = 2352;
+    // Cue-less image (.iso/.img/...): a size that only divides by 2048 is a
+    // cooked data-only dump.
+    const u64 raw_bytes = file_size_bytes(bin_fs.string());
+    if (raw_bytes != 0 && raw_bytes % 2352u != 0 && raw_bytes % 2048u == 0) {
+      track.type = "MODE1/2048";
+      track.sector_size = 2048;
+    }
     track.index01_file_lba = 0;
     track.index01_abs_lba = 150;
     track.index01_file_offset = 0;

@@ -1533,7 +1533,9 @@ bool App::resolve_disc_paths(const std::string& selected_path,
         return true;
     }
 
-    if (ext == ".bin") {
+    // Any other extension (.iso, .img, .mdf, ...) is loaded as a raw image;
+    // the file dialogs only suggest .bin/.cue but never block the rest.
+    {
         bin_path = selected.string();
         std::filesystem::path sibling_cue = selected;
         sibling_cue.replace_extension(".cue");
@@ -1552,9 +1554,6 @@ bool App::resolve_disc_paths(const std::string& selected_path,
         // TRACK 01 MODE2/2352 with INDEX 01 00:00:00.
         return true;
     }
-
-    error = "Unsupported disc image. Select a .cue or .bin file.";
-    return false;
 }
 
 std::array<std::string, App::kMemoryCardSlotCount> App::resolve_memory_card_paths() const {

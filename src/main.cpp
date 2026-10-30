@@ -3514,7 +3514,9 @@ int main(int argc, char *argv[]) {
            ((lowered.size() >= 4u &&
              lowered.compare(lowered.size() - 4u, 4u, ".cue") == 0) ||
             (lowered.size() >= 4u &&
-             lowered.compare(lowered.size() - 4u, 4u, ".bin") == 0));
+             lowered.compare(lowered.size() - 4u, 4u, ".bin") == 0) ||
+            lowered.compare(lowered.size() - 4u, 4u, ".iso") == 0 ||
+            lowered.compare(lowered.size() - 4u, 4u, ".img") == 0);
   };
 
   std::string wav_out_path;
