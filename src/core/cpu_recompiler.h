@@ -19,7 +19,8 @@ public:
   // dispatcher occupies [dispatcher_begin, translations_begin) and translated
   // blocks/fragments [translations_begin, end). False when no code exists.
   bool debug_code_ranges(uintptr_t &dispatcher_begin,
-                         uintptr_t &translations_begin, uintptr_t &end) const;
+                         uintptr_t &translations_begin, uintptr_t &end,
+                         uintptr_t *stubs_begin = nullptr) const;
 
 private:
   struct Impl;

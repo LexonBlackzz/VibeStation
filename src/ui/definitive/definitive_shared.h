@@ -62,6 +62,15 @@ void draw_launcher_background(
     float opacity = 1.0f,
     float zoom = 1.0f,
     float blur = 0.0f);
+// Where photo pixel (photo_x, photo_y) of the launcher background lands in
+// the window at this zoom. False until the photo has loaded.
+bool launcher_photo_point(const ImVec2& pos, const ImVec2& size, float zoom,
+                          float photo_x, float photo_y, ImVec2& out);
+// The animated logo on the photo's CRT screen (definitive_tv.cpp).
+void draw_launcher_tv(ImDrawList* draw, const ImVec2& pos, const ImVec2& size,
+                      float opacity, float zoom, float time, bool interactive);
+// Stops the TV glitch's ambience (fade: over 0.4 s).
+void stop_tv_glitch_sound(bool fade);
 void draw_launcher_readability_shade(
     ImDrawList* draw,
     const ImVec2& pos,
@@ -89,6 +98,8 @@ void play_open_sound();
 void play_close_sound();
 void play_startup_sound();
 void stop_startup_sound();
+// Fades the startup sound to silence over fade_ms (used when the intro is skipped).
+void fade_out_startup_sound(float fade_ms);
 // Counts the startup sound as played without playing it.
 void skip_startup_sound();
 

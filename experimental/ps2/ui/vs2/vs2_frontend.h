@@ -83,6 +83,7 @@ private:
     bool draw_disclaimer(ImDrawList* draw, const Layout& layout, float a);
     void update_intro(const Input& in);
     void draw_intro(ImDrawList* draw, const Layout& layout);
+    void draw_boot_crossfade(ImDrawList* draw, const Layout& layout);
     void draw_in_game(ImDrawList* draw, const ImVec2& pos, const ImVec2& size);
     void update_in_game();
     // vs2_toolbar.cpp
@@ -136,6 +137,9 @@ private:
     Logo ps1_logo_{};
     Logo ps2_logo_{};
     double boot_t0_ = 0.0;
+    // After a skip the boot animation keeps playing over the revealing menu
+    // and fades out; < 0 when not.
+    double boot_crossfade_t0_ = -1.0;
     Settings settings_{};
 
     Screen screen_ = Screen::Home;

@@ -388,6 +388,29 @@ void definitive_ui::draw_launcher_background(
     }
 }
 
+bool definitive_ui::launcher_photo_point(
+    const ImVec2& pos, const ImVec2& size, float zoom,
+    float photo_x, float photo_y, ImVec2& out) {
+    if (!ensure_background_texture_loaded() || g_background_width <= 0 ||
+        g_background_height <= 0) {
+        return false;
+    }
+    // Same UV window draw_launcher_background() shows.
+    CoverUv uv = cover_uv_for_size(size);
+    if (zoom > 1.0f) {
+        const float cu = (uv.u0 + uv.u1) * 0.5f;
+        const float cv = (uv.v0 + uv.v1) * 0.5f;
+        const float hu = (uv.u1 - uv.u0) * 0.5f / zoom;
+        const float hv = (uv.v1 - uv.v0) * 0.5f / zoom;
+        uv = CoverUv{cu - hu, cv - hv, cu + hu, cv + hv};
+    }
+    const float u = photo_x / static_cast<float>(g_background_width);
+    const float v = photo_y / static_cast<float>(g_background_height);
+    out = ImVec2(pos.x + (u - uv.u0) / (uv.u1 - uv.u0) * size.x,
+                 pos.y + (v - uv.v0) / (uv.v1 - uv.v0) * size.y);
+    return true;
+}
+
 void definitive_ui::draw_settings_background(
     ImDrawList* draw,
     const ImVec2& pos,

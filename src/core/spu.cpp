@@ -1314,12 +1314,15 @@ void Spu::write16(u32 offset, u16 value) {
   case 0x182:
     master_vol_r_ = decode_fixed_volume_q15(value);
     break;
+  // vLOUT/vROUT are plain signed volumes, not sweep-capable ones like the
+  // master volume: the BIOS writes 0x5EBC, which as a sweep-style fixed
+  // volume decodes negative (an inverted, quieter reverb).
   case 0x184:
-    reverb_depth_l_ = decode_fixed_volume_q15(value);
+    reverb_depth_l_ = static_cast<s16>(value);
     audio_diag_.saw_reverb_config_write = true;
     break;
   case 0x186:
-    reverb_depth_r_ = decode_fixed_volume_q15(value);
+    reverb_depth_r_ = static_cast<s16>(value);
     audio_diag_.saw_reverb_config_write = true;
     break;
   case 0x188:
@@ -1888,8 +1891,10 @@ s16 Spu::step_reverb_channel(bool right_channel, s16 lin, s16 rin,
   const u16 m_apf2 =
       right_channel ? reverb_regs_.m_rapf2 : reverb_regs_.m_lapf2;
 
+  // Both reflections take this channel's input; only the diff tap reads the
+  // other side's buffer ([mLDIFF] = Lin + [dRDIFF] * vWALL ...).
   const s16 in_same = right_channel ? rin : lin;
-  const s16 in_cross = right_channel ? lin : rin;
+  const s16 in_cross = in_same;
 
   if (same_diff_enabled) {
     const s16 same_tap = read_spu_s16(reverb_addr_from_reg(d_same, 0));
@@ -2209,12 +2214,6 @@ void Spu::tick_global_sweeps() {
   }
   if ((regs_[0x182u / 2u] & 0x8000u) != 0u) {
     master_vol_r_ = sat16(decode_sweep_step(regs_[0x182u / 2u], master_vol_r_));
-  }
-  if ((regs_[0x184u / 2u] & 0x8000u) != 0u) {
-    reverb_depth_l_ = sat16(decode_sweep_step(regs_[0x184u / 2u], reverb_depth_l_));
-  }
-  if ((regs_[0x186u / 2u] & 0x8000u) != 0u) {
-    reverb_depth_r_ = sat16(decode_sweep_step(regs_[0x186u / 2u], reverb_depth_r_));
   }
 }
 

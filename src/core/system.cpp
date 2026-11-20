@@ -1888,6 +1888,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     }
     apply_ram_reaper_for_frame();
     apply_gpu_reaper_for_frame();
+    apply_fmv_reaper_for_frame();
     apply_sound_reaper_for_frame();
     if (grim_ != nullptr && grim_->has_hardware()) {
         grim_hardware_tick(true);
@@ -2311,6 +2312,95 @@ void System::disable_gpu_reaper() {
     GpuReaperConfig cfg = gpu_reaper_config();
     cfg.enabled = false;
     set_gpu_reaper_config(cfg);
+}
+
+void System::set_fmv_reaper_config(const GrimFmvReaperConfig& config) {
+    std::lock_guard<std::mutex> lock(fmv_config_mutex_);
+    fmv_config_ = config;
+}
+
+void System::apply_fmv_reaper_for_frame() {
+    GrimFmvReaperConfig cfg;
+    {
+        std::lock_guard<std::mutex> lock(fmv_config_mutex_);
+        cfg = fmv_config_;
+    }
+    // A fresh seed, or switching it on, restarts the stream: the same seed
+    // corrupts the same movie the same way.
+    if (cfg.enabled && (!fmv_applied_.enabled || cfg.seed != fmv_applied_.seed)) {
+        fmv_.classic_rng.state = cfg.seed;
+        fmv_.classic_hits.store(0, std::memory_order_relaxed);
+    }
+    fmv_applied_ = cfg;
+    fmv_.classic_on = cfg.enabled && cfg.targets != 0u;
+    fmv_.classic.targets = cfg.targets;
+    fmv_.classic.rate = static_cast<u32>(
+        std::clamp(cfg.percent, 0.0f, 100.0f) * 10.0f + 0.5f);
+    fmv_.classic.strength = std::min<u32>(cfg.strength, 1024u);
+    fmv_.genome = grim_ != nullptr && grim_->has_fmv() ? grim_ : nullptr;
+    if (fmv_.frames_since_macroblock < kGrimFmvAudioIdleFrames) {
+        ++fmv_.frames_since_macroblock;
+    }
+    mdec_.set_grim_fmv_hook(
+        fmv_.classic_on || fmv_.genome != nullptr ? &fmv_ : nullptr);
+}
+
+void System::grim_fmv_xa_audio(std::vector<s16>& samples) {
+    if (fmv_.frames_since_macroblock >= kGrimFmvAudioIdleFrames || samples.size() < 2u) {
+        return; // no movie playing: game music and voices are not ours
+    }
+    const size_t frames = samples.size() / 2u;
+    if (fmv_.classic_on && (fmv_.classic.targets & kGrimFmvAudio) != 0u) {
+        grim_fmv_audio(fmv_.classic, fmv_.classic_rng, samples.data(), frames, fmv_.classic_audio);
+    }
+    if (fmv_.genome != nullptr) {
+        fmv_.genome->fmv_audio(samples.data(), frames);
+    }
+}
+
+void System::FmvDispatch::fmv_begin_macroblock() {
+    frames_since_macroblock = 0;
+    if (classic_on) {
+        grim_fmv_begin(classic, classic_rng, classic_mb);
+        if (classic_mb.hit) {
+            classic_hits.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    if (genome != nullptr) {
+        genome->fmv_begin_macroblock();
+    }
+}
+
+u16 System::FmvDispatch::fmv_coefficient(u16 halfword) {
+    if (classic_on) {
+        halfword = grim_fmv_coefficient(classic, classic_mb, halfword);
+    }
+    return genome != nullptr ? genome->fmv_coefficient(halfword) : halfword;
+}
+
+void System::FmvDispatch::fmv_quant_table(u8 *table, size_t n) {
+    if (classic_on) {
+        grim_fmv_quant(classic, classic_rng, table, n);
+    }
+    if (genome != nullptr) {
+        genome->fmv_quant_table(table, n);
+    }
+}
+
+void System::FmvDispatch::fmv_blocks(int *blocks, size_t count) {
+    if (classic_on) {
+        grim_fmv_blocks(classic, classic_mb, blocks, count);
+    }
+    if (genome != nullptr) {
+        genome->fmv_blocks(blocks, count);
+    }
+}
+
+u32 System::FmvDispatch::fmv_output_word(u32 word) {
+    if (classic_on) {
+        word = grim_fmv_output(classic, classic_mb, word);
+    }
+    return genome != nullptr ? genome->fmv_output_word(word) : word;
 }
 
 void System::set_sound_reaper_config(const SoundReaperConfig& config) {
@@ -2883,8 +2973,11 @@ u8 System::read8(u32 addr) {
         if (io >= 0x040 && io < 0x050) {
             note_sio_io(phys);
             sync_sio_to_cpu();
-            cpu_timing_boundary_requested_ = true;
-            return sio_.read8(io - 0x040);
+            // A read can pop the RX FIFO or acknowledge; only a deadline that
+            // moves into the running slice needs a scheduler boundary.
+            const u8 value = sio_.read8(io - 0x040);
+            note_device_state_changed();
+            return value;
         }
         // SIO (serial port) - not used by most games, return open bus
         if (io >= 0x050 && io < 0x060) {
@@ -2993,8 +3086,11 @@ u16 System::read16(u32 addr) {
         if (io >= 0x040 && io < 0x050) {
             note_sio_io(phys);
             sync_sio_to_cpu();
-            cpu_timing_boundary_requested_ = true;
-            return sio_.read16(io - 0x040);
+            // A read can pop the RX FIFO or acknowledge; only a deadline that
+            // moves into the running slice needs a scheduler boundary.
+            const u16 value = sio_.read16(io - 0x040);
+            note_device_state_changed();
+            return value;
         }
         // SIO registers (0x1F801050-0x1F80105F) - not used by most games, return open bus
         if (io >= 0x050 && io < 0x060) {
@@ -3101,8 +3197,11 @@ u32 System::read32(u32 addr) {
         if (io >= 0x040 && io < 0x050) {
             note_sio_io(phys);
             sync_sio_to_cpu();
-            cpu_timing_boundary_requested_ = true;
-            return sio_.read32(io - 0x040);
+            // A read can pop the RX FIFO or acknowledge; only a deadline that
+            // moves into the running slice needs a scheduler boundary.
+            const u32 value = sio_.read32(io - 0x040);
+            note_device_state_changed();
+            return value;
         }
         // GPU
         if (io == 0x810)

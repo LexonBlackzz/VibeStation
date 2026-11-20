@@ -1056,6 +1056,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_r(12, 1, 13, 0, 0x21),
       enc_i(0x05, 1, 0, -13),
       enc_i(0x09, 5, 5, 1),
+      0x0000000Du, // BREAK: never executed; ends the V5 superblock
   };
   v4_crossline_block.instructions = 28u;
   v4_crossline_block.require_full_native_when_available = true;
@@ -4648,7 +4649,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x0D, 2, 3, 0x10),    // ORI prefix
       enc_i(0x05, 3, 0, 1),       // BNE
       enc_i(0x09, 0, 4, 0x44),    // delay slot
-      0,
+      0x0000000Du, // BREAK: never executed; ends the V5 superblock
   };
   v4_uncached_folded_branch.instructions = 4u;
   v4_uncached_folded_branch.require_v4_native_entry_when_available = true;
@@ -5563,7 +5564,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x09, 2, 3, 1),
       enc_i(0x05, 2, 0, 2),
       enc_i(0x09, 0, 5, 0x55),
-      0u,
+      0x0000000Du, // BREAK: never executed; ends the V5 superblock
   };
   v4_cached_load_alu_branch.instructions = 4u;
   v4_cached_load_alu_branch.require_v4_native_entry_when_available = true;
@@ -5583,7 +5584,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x23, 1, 2, 0),
       enc_i(0x04, 2, 0, 2),
       enc_r(2, 0, 5, 0, 0x21),
-      0u,
+      0x0000000Du, // BREAK: never executed; ends the V5 superblock
   };
   v4_uncached_load_branch_delay.instructions = 3u;
   v4_uncached_load_branch_delay.require_v4_native_entry_when_available = true;
@@ -5830,6 +5831,30 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
     test.require_v4_native_entry_when_available = true;
     test.require_v4_native_load_entry_when_available = true;
     test.require_v4_hot_mmio16_native_when_available = variant.hot16;
+    cases.push_back(test);
+  }
+
+  // A load delay slot opening a cold I-cache line that reads a device: the
+  // branch yields and the pending path performs the delay slot's fetch, so
+  // the timer is read at the pre-fetch cycle (regression: an in-block refill
+  // of that line made the read 4 cycles late).
+  {
+    CpuCompareCase test{};
+    test.name = "v5_cold_delay_line_device_load_timestamp";
+    test.start_pc = 0x80010000u;
+    test.initial_gpr[1] = 0x1F801120u;
+    test.initial_gpr[3] = 1u;
+    test.program = {
+        enc_i(0x2B, 1, 0, 4), // SW r0 -> T2 MODE (resets the counter)
+        0u,
+        0u,
+        enc_i(0x05, 3, 0, 2), // BNE r3, r0 (taken), last word of the line
+        enc_i(0x23, 1, 2, 0), // delay: LW r2 <- T2 COUNTER, next line
+        0x0000000Du,          // BREAK: never executed
+        0u,                   // branch target
+        0u,
+    };
+    test.instructions = 6u;
     cases.push_back(test);
   }
 

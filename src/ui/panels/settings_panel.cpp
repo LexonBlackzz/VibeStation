@@ -19,7 +19,8 @@ void App::panel_settings() {
         if (ImGui::BeginTabBar("SettingsTabs")) {
             if (ImGui::BeginTabItem("Input")) {
                 ImGui::TextWrapped("Default: Arrows=D-Pad, Z/X/A/S=Face, "
-                    "Q/W/E/R=Shoulders, Enter=Start, Backspace=Select");
+                    "Q/W/E/R=Shoulders, Enter=Start, Select unbound "
+                    "(Backspace is fast forward)");
                 ImGui::Spacing();
                 if (pending_bind_index_ >= 0) {
                     ImGui::TextColored(ImVec4(0.95f, 0.8f, 0.3f, 1.0f),

@@ -82,6 +82,13 @@ void App::disable_sound_reaper_mode() {
     }
 }
 
+void App::sync_fmv_reaper_config() {
+    if (!system_) {
+        return;
+    }
+    system_->set_fmv_reaper_config(fmv_reaper_);
+}
+
 void App::sync_disc_reaper_config() {
     if (!system_) {
         return;

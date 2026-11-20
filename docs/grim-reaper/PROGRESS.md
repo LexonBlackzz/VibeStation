@@ -4,6 +4,27 @@ Read this first in every new session, then `DESIGN.md`, then
 `PROJECT_BRIEF.md` (the code map). The conventions file is the repo-root
 `AGENTS.md`. It is gitignored and local to Lexon's machine.
 
+## FMV corruption (2026-10-07)
+
+Movies corrupted inside the MDEC as they decode (`src/core/grim_fmv.{h,cpp}`, one engine for both
+front ends; the MDEC calls it through `GrimFmvHook`, which `System::FmvDispatch` implements).
+
+- **Targets** (bit mask): 1 coefficient levels, 2 quantisation tables (as uploaded; uses strength
+  only), 4 whole 8x8 blocks (swap, copy, flatten, invert, roll), 8 output pixels, 16 the movie's
+  XA audio (per decoded sector: stutter, skip back into the previous sector, reverse, crush,
+  dropout, blast, static). Runs, the 0xFE00 end code, output sizes and sample counts are never
+  changed, so a corrupted movie never stalls the game. Audio is only touched while the MDEC has
+  decoded a macroblock in the last 30 frames (`System::grim_fmv_xa_audio`), so game music and
+  voices outside movies stay clean.
+- **Classic:** "FMV Reaper" style (macroblock share, strength, targets, seed). Off in
+  `stop_all_corruption()`.
+- **Gene `mdec_fmv`** (genome v1): target = the mask above, params `rate` (permille of
+  macroblocks, default 150) and `strength` (0..1024, default 256), both scaled by the trigger.
+- **FMV family** (green, bit 32) in New Corruption. `GrimRandomParams::fmv` is off by default, so
+  every earlier seed of `grim_random_genome` draws as before; pulls with the FMV family on differ.
+- Tests: `fmv_*` in `--grim-gene-test`, `pull_fmv_family_makes_fmv_genes` in `--grim-pull-test`.
+  Checked on A-Train's intro with `--genome` + `--frame-test`: broken picture, same frame timing.
+
 ## Follow-up after the v0.6.0 merge (2026-10-06)
 
 `grim-reaper/phase-5.1` now contains main (v0.6.0: VibeStation 2 / PS2 lab, new launcher). The

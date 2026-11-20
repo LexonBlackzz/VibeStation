@@ -4,6 +4,8 @@
 #include <deque>
 #include <vector>
 
+class GrimFmvHook;
+
 class Mdec {
 public:
   struct DebugStats {
@@ -61,6 +63,8 @@ public:
   };
 
   void reset();
+  // Grim Reaper FMV corruption (nullptr = off). Not part of save states.
+  void set_grim_fmv_hook(GrimFmvHook *hook) { grim_fmv_ = hook; }
 
   void write_command(u32 value);
   void write_control(u32 value);
@@ -195,5 +199,7 @@ private:
   std::deque<u32> pending_out_macroblock_fifo_{};
   DebugStats debug_stats_{};
   DebugCompare debug_compare_{};
+  GrimFmvHook *grim_fmv_ = nullptr;
+  bool fmv_macroblock_started_ = false;
   void refresh_debug_quant_stats();
 };

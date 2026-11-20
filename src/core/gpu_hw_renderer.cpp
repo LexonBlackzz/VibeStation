@@ -88,6 +88,9 @@
 #ifndef GL_CONSTANT_COLOR
 #define GL_CONSTANT_COLOR 0x8001
 #endif
+#ifndef GL_SRC1_COLOR
+#define GL_SRC1_COLOR 0x88F9
+#endif
 #ifndef GL_MAX_TEXTURE_SIZE
 #define GL_MAX_TEXTURE_SIZE 0x0D33
 #endif
@@ -102,16 +105,23 @@ constexpr const char *kDrawVertexShader = R"GLSL(
 layout(location = 0) in vec3 a_pos;   // VRAM x, y and PGXP depth w
 layout(location = 1) in vec4 a_color; // normalized RGB
 layout(location = 2) in vec2 a_uv;
+layout(location = 3) in vec4 a_uv_limits; // texel range of the primitive
 
+uniform float u_pixel_offset; // polygons: PS1 samples at integer pixel positions
 noperspective out vec3 v_color;  // PS1 gouraud shading is affine
 out vec2 v_uv;                   // perspective-correct when w varies
+flat out vec4 v_uv_limits;
 
 void main() {
-    vec2 ndc = a_pos.xy / vec2(1024.0, 512.0) * 2.0 - 1.0;
+    // The PS1 covers and samples a pixel at its integer position, GL at the
+    // centre; shifting polygons by half a pixel lines the two up (upscaled,
+    // the sub-samples then sit around the native sample point).
+    vec2 ndc = (a_pos.xy + u_pixel_offset) / vec2(1024.0, 512.0) * 2.0 - 1.0;
     float w = a_pos.z;
     gl_Position = vec4(ndc * w, 0.0, w);
     v_color = a_color.rgb;
     v_uv = a_uv;
+    v_uv_limits = a_uv_limits;
 }
 )GLSL";
 
@@ -132,10 +142,16 @@ uniform int u_check_mask; // discard where the destination mask bit is set
 uniform int u_true_color; // keep full colour precision instead of 15-bit
 uniform int u_dither;     // 15-bit output: apply the PS1 dither pattern
 uniform int u_filter;     // bilinear texture filtering
+// Semi-transparency mode blended in one pass (dual-source): 0 B/2+F/2,
+// 1 B+F, 3 B+F/4; -1 when blending is not done this way.
+uniform int u_semi_mode;
 
 noperspective in vec3 v_color;
 in vec2 v_uv;
-out vec4 o_color;
+flat in vec4 v_uv_limits;
+layout(location = 0, index = 0) out vec4 o_color;
+// Per-fragment destination factor for dual-source blending.
+layout(location = 0, index = 1) out vec4 o_blend;
 
 const int kDither[16] = int[16](-4, 0, -3, 1, 2, -2, 3, -1,
                                 -3, 1, -4, 0, 3, -1, 2, -2);
@@ -148,6 +164,7 @@ struct Texel {
     vec3 rgb;  // 0..1, where 1 is 31/31
     bool transparent;
     bool semi;
+    float semi_weight; // 0..1; fractional when filtered
 };
 
 // Texel at texture coordinate `uv`; `sub` is the position inside the texel
@@ -173,14 +190,21 @@ Texel decode(ivec2 uv, vec2 sub) {
         ivec2 ip = ivec2(p);
         ip = ivec2(ip.x % size.x, ip.y % size.y);
         vec4 c = texelFetch(u_color_copy, ip, 0);
-        uvec3 c5 = uvec3(floor(c.rgb * 31.0 + 0.5));
-        texel = c5.r | (c5.g << 5) | (c5.b << 10) | (c.a > 0.5 ? 0x8000u : 0u);
+        // Transparency and the semi-transparency bit come from the real
+        // VRAM texel, as on hardware; near-black upscaled samples inside an
+        // opaque texel must not punch holes.
+        texel = fetch(u_tex_base + uv);
         precise = c.rgb;
+        if (u_true_color == 0) {
+            uvec3 c5 = uvec3(floor(c.rgb * 31.0 + 0.5));
+            precise = vec3(c5) / 31.0;
+        }
     }
     Texel t;
     t.transparent = texel == 0u;
     t.semi = (texel & 0x8000u) != 0u;
-    t.rgb = (u_true_color != 0 && precise.x >= 0.0)
+    t.semi_weight = t.semi ? 1.0 : 0.0;
+    t.rgb = precise.x >= 0.0
         ? precise
         : vec3(float(texel & 31u), float((texel >> 5) & 31u),
                float((texel >> 10) & 31u)) / 31.0;
@@ -193,10 +217,14 @@ Texel decode_filtered() {
     vec2 st = v_uv - 0.5;
     ivec2 base = ivec2(floor(st));
     vec2 f = st - floor(st);
-    Texel t00 = decode(base, vec2(0.5));
-    Texel t10 = decode(base + ivec2(1, 0), vec2(0.5));
-    Texel t01 = decode(base + ivec2(0, 1), vec2(0.5));
-    Texel t11 = decode(base + ivec2(1, 1), vec2(0.5));
+    // Stay inside the primitive's texel range: texture atlases pack
+    // unrelated images right next to each other.
+    ivec2 lo = ivec2(v_uv_limits.xy);
+    ivec2 hi = ivec2(v_uv_limits.zw);
+    Texel t00 = decode(clamp(base, lo, hi), vec2(0.5));
+    Texel t10 = decode(clamp(base + ivec2(1, 0), lo, hi), vec2(0.5));
+    Texel t01 = decode(clamp(base + ivec2(0, 1), lo, hi), vec2(0.5));
+    Texel t11 = decode(clamp(base + ivec2(1, 1), lo, hi), vec2(0.5));
     vec4 w = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y),
                   (1.0 - f.x) * f.y, f.x * f.y);
     w *= vec4(t00.transparent ? 0.0 : 1.0, t10.transparent ? 0.0 : 1.0,
@@ -205,6 +233,9 @@ Texel decode_filtered() {
     Texel nearest = decode(ivec2(floor(v_uv)), fract(v_uv));
     Texel t;
     t.semi = nearest.semi;
+    float semi_sum = w.x * (t00.semi ? 1.0 : 0.0) + w.y * (t10.semi ? 1.0 : 0.0) +
+                     w.z * (t01.semi ? 1.0 : 0.0) + w.w * (t11.semi ? 1.0 : 0.0);
+    t.semi_weight = a > 0.0 ? semi_sum / a : 0.0;
     t.transparent = a < 0.5;
     t.rgb = a > 0.0
         ? (t00.rgb * w.x + t10.rgb * w.y + t01.rgb * w.z + t11.rgb * w.w) / a
@@ -228,6 +259,7 @@ void main() {
     }
     vec3 rgb;
     float mask = 0.0;
+    float semi = 1.0; // how much of this fragment blends (semi draws)
     if (u_textured != 0) {
         Texel tx = u_filter != 0 ? decode_filtered()
                                  : decode(ivec2(floor(v_uv)), fract(v_uv));
@@ -250,6 +282,7 @@ void main() {
             }
         }
         mask = tx.semi ? 1.0 : 0.0;
+        semi = tx.semi_weight;
     } else {
         rgb = u_true_color != 0 ? v_color
                                 : to_15bit(floor(v_color * 255.0 + 0.5));
@@ -257,7 +290,19 @@ void main() {
     if (u_set_mask != 0) {
         mask = 1.0;
     }
-    o_color = vec4(rgb, mask);
+    // Dual-source blend: out = colour * src_factor + dst * dst_factor, per
+    // fragment, so opaque and semi-transparent texels of one draw blend in
+    // drawing order (a two-pass split would reorder overlapping primitives).
+    vec2 fac = vec2(1.0, 0.0);
+    if (u_semi_mode == 0) {
+        fac = mix(fac, vec2(0.5, 0.5), semi);
+    } else if (u_semi_mode == 1) {
+        fac = mix(fac, vec2(1.0, 1.0), semi);
+    } else if (u_semi_mode == 3) {
+        fac = mix(fac, vec2(0.25, 1.0), semi);
+    }
+    o_color = vec4(rgb * fac.x, mask);
+    o_blend = vec4(vec3(fac.y), 0.0);
 }
 )GLSL";
 
@@ -309,6 +354,7 @@ struct GpuHwRenderer::Gl {
   using UseProgramFn = void(APIENTRY *)(GLuint);
   using GetUniformLocationFn = GLint(APIENTRY *)(GLuint, const char *);
   using Uniform1iFn = void(APIENTRY *)(GLint, GLint);
+  using Uniform1fFn = void(APIENTRY *)(GLint, GLfloat);
   using Uniform2iFn = void(APIENTRY *)(GLint, GLint, GLint);
   using Uniform4iFn = void(APIENTRY *)(GLint, GLint, GLint, GLint, GLint);
   using BindVertexArrayFn = void(APIENTRY *)(GLuint);
@@ -344,6 +390,7 @@ struct GpuHwRenderer::Gl {
   UseProgramFn UseProgram = nullptr;
   GetUniformLocationFn GetUniformLocation = nullptr;
   Uniform1iFn Uniform1i = nullptr;
+  Uniform1fFn Uniform1f = nullptr;
   Uniform2iFn Uniform2i = nullptr;
   Uniform4iFn Uniform4i = nullptr;
   GenFn GenVertexArrays = nullptr;
@@ -382,7 +429,7 @@ struct GpuHwRenderer::Gl {
     GLint vram = -1, textured = -1, raw = -1, depth = -1, tex_base = -1,
           clut = -1, window = -1, pass = -1, set_mask = -1, color_copy = -1,
           scale = -1, check_mask = -1, true_color = -1, dither = -1,
-          filter = -1;
+          filter = -1, pixel_offset = -1, semi_mode = -1;
   } draw_u;
   GLint copy_vram = -1;
   GLint copy_scale = -1;
@@ -415,6 +462,7 @@ struct GpuHwRenderer::Gl {
     load_proc(UseProgram, "glUseProgram");
     load_proc(GetUniformLocation, "glGetUniformLocation");
     load_proc(Uniform1i, "glUniform1i");
+    load_proc(Uniform1f, "glUniform1f");
     load_proc(Uniform2i, "glUniform2i");
     load_proc(Uniform4i, "glUniform4i");
     load_proc(GenVertexArrays, "glGenVertexArrays");
@@ -595,6 +643,8 @@ bool GpuHwRenderer::init(int scale) {
   u.true_color = gl->GetUniformLocation(p, "u_true_color");
   u.dither = gl->GetUniformLocation(p, "u_dither");
   u.filter = gl->GetUniformLocation(p, "u_filter");
+  u.pixel_offset = gl->GetUniformLocation(p, "u_pixel_offset");
+  u.semi_mode = gl->GetUniformLocation(p, "u_semi_mode");
   gl->copy_vram = gl->GetUniformLocation(gl->copy_program, "u_vram");
   gl->copy_scale = gl->GetUniformLocation(gl->copy_program, "u_scale");
 
@@ -612,7 +662,10 @@ bool GpuHwRenderer::init(int scale) {
                           reinterpret_cast<const void *>(offsetof(GpuHwVertex, u)));
   gl->EnableVertexAttribArray(0);
   gl->EnableVertexAttribArray(1);
+  gl->VertexAttribPointer(3, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride,
+                          reinterpret_cast<const void *>(offsetof(GpuHwVertex, uv_limits)));
   gl->EnableVertexAttribArray(2);
+  gl->EnableVertexAttribArray(3);
   gl->GenVertexArrays(1, &gl->empty_vao);
 
   gl->native_texture =
@@ -847,6 +900,7 @@ void GpuHwRenderer::draw_triangles(const GpuHwStream &stream,
   gl.Uniform1i(u.dither, (cmd.flags & gpu_hw::kDither) ? 1 : 0);
   gl.Uniform1i(u.filter,
                g_gpu_texture_filter && !(cmd.flags & gpu_hw::kSprite) ? 1 : 0);
+  gl.Uniform1f(u.pixel_offset, (cmd.flags & gpu_hw::kSprite) ? 0.0f : 0.5f);
   gl.ActiveTexture(GL_TEXTURE0 + 1);
   glBindTexture(GL_TEXTURE_2D, gl.sample_texture);
   gl.ActiveTexture(GL_TEXTURE0);
@@ -905,23 +959,37 @@ void GpuHwRenderer::draw_triangles(const GpuHwStream &stream,
   };
 
   const GLsizei count = static_cast<GLsizei>(cmd.count);
+  gl.Uniform1i(u.semi_mode, -1);
+  gl.Uniform1i(u.pass, 0);
   if (!semi) {
     set_opaque();
-    gl.Uniform1i(u.pass, 0);
+    glDrawArrays(GL_TRIANGLES, 0, count);
+  } else if ((cmd.semi_mode & 3u) != 2u) {
+    // One pass: the shader outputs each fragment's own blend factors
+    // (opaque texels 1,0; semi texels the mode's), so overlapping
+    // primitives of the batch still blend in drawing order.
+    glEnable(GL_BLEND);
+    gl.BlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+    gl.BlendFuncSeparate(GL_ONE, GL_SRC1_COLOR, GL_ONE, GL_ZERO);
+    gl.Uniform1i(u.semi_mode, cmd.semi_mode & 3u);
+    gl.Uniform1i(u.check_mask, check_mask ? 1 : 0);
     glDrawArrays(GL_TRIANGLES, 0, count);
   } else if (!textured) {
     set_semi(cmd.semi_mode);
-    gl.Uniform1i(u.pass, 0);
     glDrawArrays(GL_TRIANGLES, 0, count);
   } else {
-    // Texel bit 15 selects blending per texel: opaque texels first, then
-    // the semi-transparent ones blended.
-    set_opaque();
-    gl.Uniform1i(u.pass, 1);
-    glDrawArrays(GL_TRIANGLES, 0, count);
-    set_semi(cmd.semi_mode);
-    gl.Uniform1i(u.pass, 2);
-    glDrawArrays(GL_TRIANGLES, 0, count);
+    // B-F cannot be expressed per fragment with one blend equation. Texel
+    // bit 15 selects blending per texel, so draw opaque texels then semi
+    // ones, one triangle at a time to keep the drawing order.
+    for (GLsizei first = 0; first < count; first += 3) {
+      set_opaque();
+      gl.Uniform1i(u.check_mask, 0);
+      gl.Uniform1i(u.pass, 1);
+      glDrawArrays(GL_TRIANGLES, first, 3);
+      set_semi(cmd.semi_mode);
+      gl.Uniform1i(u.pass, 2);
+      glDrawArrays(GL_TRIANGLES, first, 3);
+    }
   }
   glDisable(GL_BLEND);
   mark_stale(area_x0, area_y0, area_x1, area_y1);

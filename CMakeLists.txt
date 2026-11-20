@@ -150,6 +150,7 @@ set(VIBESTATION_SOURCES
     src/ui/theme_settings.cpp
     src/ui/definitive/definitive_audio.cpp
     src/ui/definitive/definitive_background.cpp
+    src/ui/definitive/definitive_tv.cpp
     src/ui/definitive/definitive_fonts.cpp
     src/ui/definitive/definitive_gameplay_ambient.cpp
     src/ui/definitive/definitive_grim_reaper.cpp
@@ -190,6 +191,7 @@ set(VIBESTATION_SOURCES
     src/core/grim_share.cpp
     src/core/grim_classic.cpp
     src/core/grim_disc.cpp
+    src/core/grim_fmv.cpp
 )
 
 set(VIBESTATION_VERSION_STRING "v0.6.0")
@@ -222,11 +224,14 @@ if(WIN32)
     # VibeStation 2's sounds and logos.
     target_sources(VibeStation PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/resources/vibestation.rc)
-    # Re-embed when one of VibeStation 2's files changes.
+    # Re-embed when one of the embedded files changes.
     file(GLOB VIBESTATION_VS2_RESOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/experimental/ps2/resources/vs2/*.wav
         ${CMAKE_CURRENT_SOURCE_DIR}/experimental/ps2/resources/vs2/*.ogg
-        ${CMAKE_CURRENT_SOURCE_DIR}/experimental/ps2/resources/vs2/*.png)
+        ${CMAKE_CURRENT_SOURCE_DIR}/experimental/ps2/resources/vs2/*.png
+        ${CMAKE_CURRENT_SOURCE_DIR}/resources/ui/definitive/sounds/*.wav
+        ${CMAKE_CURRENT_SOURCE_DIR}/resources/ui/definitive/sounds/*.ogg
+        ${CMAKE_CURRENT_SOURCE_DIR}/resources/ui/definitive/*.jpg)
     set_source_files_properties(
         ${CMAKE_CURRENT_SOURCE_DIR}/resources/vibestation.rc
         PROPERTIES OBJECT_DEPENDS "${VIBESTATION_VS2_RESOURCES}")
@@ -336,6 +341,12 @@ add_custom_command(TARGET VibeStation POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${VIBESTATION_UI_SOUND_DIR}/logo.wav"
         "$<TARGET_FILE_DIR:VibeStation>/resources/ui/definitive/sounds/logo.wav"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${VIBESTATION_UI_SOUND_DIR}/fearfulambience.ogg"
+        "$<TARGET_FILE_DIR:VibeStation>/resources/ui/definitive/sounds/fearfulambience.ogg"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${VIBESTATION_UI_SOUND_DIR}/feared.ogg"
+        "$<TARGET_FILE_DIR:VibeStation>/resources/ui/definitive/sounds/feared.ogg"
     COMMENT "Copying definitive UI sound effects"
     VERBATIM)
 endif()

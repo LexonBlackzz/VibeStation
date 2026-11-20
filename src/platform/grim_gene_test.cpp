@@ -2,6 +2,7 @@
 // triggers, end-to-end on the stock BIOS, determinism, --grim-explore).
 #include "core/grim_eval.h"
 #include "core/grim_genome.h"
+#include "core/grim_fmv.h"
 #include "core/bios.h"
 #include "core/system.h"
 #include "core/types.h"
@@ -1038,6 +1039,9 @@ void test_gp0_transforms() {
       if (grim_gene_is_hardware(type)) {
         continue; // memory faults, not GP0 traffic: --grim-pull-test covers them
       }
+      if (type == GrimGeneType::MdecFmv) {
+        continue; // MDEC traffic, not GP0: test_fmv() covers it
+      }
       for (int round = 0; round < 40 && ok; ++round) {
         GrimGene g = grim_default_gene(type);
         const auto &schema = grim_gene_schema(type);
@@ -1085,11 +1089,133 @@ void test_gp0_transforms() {
     bool all_active = true;
     for (size_t t = static_cast<size_t>(GrimGeneType::GpuVertex); t < static_cast<size_t>(GrimGeneType::Count); ++t) {
       if (!grim_gene_is_rom(static_cast<GrimGeneType>(t)) &&
-          !grim_gene_is_hardware(static_cast<GrimGeneType>(t))) {
+          !grim_gene_is_hardware(static_cast<GrimGeneType>(t)) &&
+          static_cast<GrimGeneType>(t) != GrimGeneType::MdecFmv) {
         all_active = all_active && changed_by_type[t] > 0;
       }
     }
     check(all_active, "gp0_fuzz_every_gene_type_changes_something");
+  }
+}
+
+// ---- FMV (MDEC) ------------------------------------------------------------------------
+
+void test_fmv() {
+  // The engine never changes how much data the MDEC consumes: runs (bits 10-15) and
+  // the 0xFE00 end/padding code survive any amount of corruption.
+  {
+    const GrimFmvKnobs k{kGrimFmvAll, 1000u, 1024u};
+    GrimRng rng{77};
+    bool ok = true;
+    u32 changed = 0;
+    std::string detail;
+    for (int mb = 0; mb < 2000 && ok; ++mb) {
+      GrimFmvMacroblock m;
+      grim_fmv_begin(k, rng, m);
+      for (u32 h = 0; h < 64 && ok; ++h) {
+        const u16 in = h == 0 ? 0xFE00u : static_cast<u16>(rng.next());
+        const u16 out = grim_fmv_coefficient(k, m, in);
+        changed += in != out ? 1u : 0u;
+        if ((in == 0xFE00u) != (out == 0xFE00u) || ((in ^ out) & 0xFC00u) != 0u) {
+          ok = false;
+          detail = hex(in) + "->" + hex(out);
+        }
+      }
+    }
+    check(ok && changed > 0, "fmv_coefficients_keep_runs_and_end_codes", detail);
+  }
+  // Rate 0 or no targets hits nothing, and output/blocks pass through untouched.
+  {
+    GrimRng rng{5};
+    bool clean = true;
+    for (const GrimFmvKnobs k : {GrimFmvKnobs{kGrimFmvAll, 0u, 1024u}, GrimFmvKnobs{0u, 1000u, 1024u}}) {
+      for (int i = 0; i < 200; ++i) {
+        GrimFmvMacroblock m;
+        grim_fmv_begin(k, rng, m);
+        int blocks[6 * 64];
+        for (int &v : blocks) v = static_cast<int>(rng.range(0, 255)) - 128;
+        int copy[6 * 64];
+        std::copy(std::begin(blocks), std::end(blocks), copy);
+        clean = clean && !m.hit && grim_fmv_output(k, m, 0x12345678u) == 0x12345678u &&
+                !grim_fmv_blocks(k, m, blocks, 6) && std::equal(std::begin(blocks), std::end(blocks), copy);
+      }
+    }
+    check(clean, "fmv_rate_zero_or_no_targets_is_clean");
+  }
+  // Quant entries stay usable (1..255) and only change when targeted.
+  {
+    GrimRng rng{9};
+    std::array<u8, 64> q{};
+    q.fill(16);
+    const size_t none = grim_fmv_quant(GrimFmvKnobs{kGrimFmvCoeffs, 1000u, 1024u}, rng, q.data(), q.size());
+    const size_t some = grim_fmv_quant(GrimFmvKnobs{kGrimFmvQuant, 0u, 1024u}, rng, q.data(), q.size());
+    const bool valid = std::all_of(q.begin(), q.end(), [](u8 v) { return v >= 1u; });
+    check(none == 0 && some > 0 && valid, "fmv_quant_targeted_and_valid");
+  }
+  // Movie audio: rate 0 (or no audio target) leaves a sector alone; full rate damages
+  // every sector without ever reading or writing past it.
+  {
+    std::vector<s16> sector(2016u * 2u + 2u);
+    for (size_t i = 0; i < sector.size(); ++i) sector[i] = static_cast<s16>(i * 37u);
+    const std::vector<s16> orig = sector;
+    GrimRng rng{3};
+    GrimFmvAudioMemory mem;
+    const bool quiet =
+        !grim_fmv_audio(GrimFmvKnobs{kGrimFmvAll, 0u, 1024u}, rng, sector.data(), 2016u, mem) &&
+        !grim_fmv_audio(GrimFmvKnobs{kGrimFmvCoeffs, 1000u, 1024u}, rng, sector.data(), 2016u, mem) &&
+        sector == orig;
+    u32 hits = 0, changed = 0;
+    bool bounded = true;
+    for (u32 strength : {1u, 300u, 1024u}) {
+      for (int i = 0; i < 60; ++i) {
+        std::vector<s16> s = orig;
+        hits += grim_fmv_audio(GrimFmvKnobs{kGrimFmvAudio, 1000u, strength}, rng, s.data(), 2016u, mem) ? 1u : 0u;
+        changed += s != orig ? 1u : 0u;
+        bounded = bounded && s[2016u * 2u] == orig[2016u * 2u] && s[2016u * 2u + 1u] == orig[2016u * 2u + 1u];
+      }
+    }
+    check(quiet && hits == 180u && changed > 150u && bounded, "fmv_audio_hits_sectors_in_bounds",
+          std::to_string(hits) + " hits, " + std::to_string(changed) + " changed");
+  }
+  // The gene: parses, round-trips, and its runtime hits macroblocks under its trigger.
+  {
+    GrimGene g = make_gene(GrimGeneType::MdecFmv, {{"rate", 1000}, {"strength", 1024}});
+    GrimGenome genome;
+    genome.genes.push_back(g);
+    GrimGenome back;
+    std::string err;
+    const bool round = grim_genome_parse(grim_genome_serialize(genome), back, err) &&
+                       grim_genome_serialize(back) == grim_genome_serialize(genome);
+    check(round, "fmv_gene_roundtrip", err);
+
+    auto rt = make_rt({g});
+    u32 changed = 0;
+    for (int mb = 0; mb < 100; ++mb) {
+      rt->fmv_begin_macroblock();
+      for (u32 i = 0; i < 32; ++i) {
+        changed += rt->fmv_coefficient(static_cast<u16>(0x0400u + i)) != 0x0400u + i ? 1u : 0u;
+      }
+    }
+    check(rt->has_fmv() && changed > 0 && rt->hits()[0] == 100u, "fmv_gene_hits_macroblocks",
+          std::to_string(changed));
+
+    GrimGene off = g;
+    off.trigger.kind = GrimTriggerKind::Window;
+    off.trigger.start_frame = 100;
+    off.trigger.end_frame = 200;
+    auto idle = make_rt({off}, 10);
+    idle->fmv_begin_macroblock();
+    check(idle->fmv_coefficient(0x0401u) == 0x0401u && idle->hits()[0] == 0u,
+          "fmv_gene_respects_trigger");
+
+    GrimRandomParams rp;
+    rp.spu = rp.gpu = false;
+    rp.fmv = true;
+    rp.min_genes = rp.max_genes = 3;
+    const GrimGenome made = grim_random_genome(42, rp);
+    bool all_fmv = made.genes.size() == 3;
+    for (const GrimGene &mg : made.genes) all_fmv = all_fmv && mg.type == GrimGeneType::MdecFmv;
+    check(all_fmv, "fmv_random_genes");
   }
 }
 
@@ -1312,6 +1438,7 @@ int run_grim_gene_test(const std::vector<std::string> &raw_args, const std::stri
   test_triggers();
   test_spu_filters();
   test_gp0_transforms();
+  test_fmv();
   if (bios.empty()) {
     std::printf("GRIM_GENE_TEST SKIP bios tests (no BIOS path or VIBESTATION_BIOS)\n");
   } else {

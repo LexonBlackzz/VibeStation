@@ -51,6 +51,17 @@ public:
     fifo_[2] = Slot{};
   }
 
+  // Precise position of screen-XY FIFO entry `index` (0..2 = SXY0..SXY2),
+  // if it is tracked and still matches the register value `sx`/`sy`.
+  bool screen_xy(int index, s16 sx, s16 sy, PreciseVertex &out) const {
+    const Slot &slot = fifo_[static_cast<size_t>(index)];
+    if (!slot.valid || slot.value != pack(sx, sy)) {
+      return false;
+    }
+    out = slot.v;
+    return true;
+  }
+
   // ── Memory mode ──────────────────────────────────────────────────
   // Precise vertices also follow the data through CPU registers and plain
   // word loads/stores. Every shadow keeps the exact 32-bit value it belongs

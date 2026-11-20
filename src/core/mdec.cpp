@@ -1,4 +1,5 @@
 #include "mdec.h"
+#include "grim_fmv.h"
 #include <algorithm>
 #include <array>
 
@@ -505,6 +506,12 @@ void Mdec::execute_set_quant_table() {
       quant_chroma_[i] = bytes[64u + i];
     }
   }
+  if (grim_fmv_ != nullptr) {
+    grim_fmv_->fmv_quant_table(quant_luma_.data(), quant_luma_.size());
+    if (has_chroma_table) {
+      grim_fmv_->fmv_quant_table(quant_chroma_.data(), quant_chroma_.size());
+    }
+  }
 
   refresh_debug_quant_stats();
 }
@@ -551,6 +558,9 @@ void Mdec::execute_decode() {
     }
   }
 
+  if (grim_fmv_ != nullptr) {
+    grim_fmv_->fmv_blocks(decode_blocks_[0].data(), needed_blocks);
+  }
   if (out_depth_latched_ == 2 || out_depth_latched_ == 3) {
     if (g_mdec_debug_compare_macroblocks) {
       compare_colored_macroblock(debug_current_macroblock_input_);
@@ -560,6 +570,11 @@ void Mdec::execute_decode() {
                             decode_blocks_[4], decode_blocks_[5]);
   } else {
     emit_monochrome_macroblock(decode_blocks_[0]);
+  }
+  if (grim_fmv_ != nullptr) {
+    for (u32 &word : out_fifo_) {
+      word = grim_fmv_->fmv_output_word(word);
+    }
   }
 
   pending_out_fifo_.swap(out_fifo_);
@@ -575,6 +590,7 @@ void Mdec::reset_decode_state() {
   current_q_scale_ = 0;
   current_block_ = (out_depth_latched_ == 2 || out_depth_latched_ == 3) ? 4 : 0;
   debug_current_macroblock_input_.clear();
+  fmv_macroblock_started_ = false;
   for (Block &block : decode_blocks_) {
     block.fill(0);
   }
@@ -609,8 +625,15 @@ bool Mdec::decode_next_block() {
 }
 
 u16 Mdec::pop_decode_halfword() {
-  const u16 value = in_halfword_fifo_.front();
+  u16 value = in_halfword_fifo_.front();
   in_halfword_fifo_.pop_front();
+  if (grim_fmv_ != nullptr) {
+    if (!fmv_macroblock_started_) {
+      fmv_macroblock_started_ = true;
+      grim_fmv_->fmv_begin_macroblock();
+    }
+    value = grim_fmv_->fmv_coefficient(value);
+  }
   if (g_mdec_debug_compare_macroblocks) {
     debug_current_macroblock_input_.push_back(value);
   }

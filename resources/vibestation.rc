@@ -4,6 +4,8 @@
 #define IDR_VIBESTATION_OPEN_WAV 104
 #define IDR_VIBESTATION_CLOSE_WAV 105
 #define IDR_VIBESTATION_LOGO_WAV 106
+#define IDR_VIBESTATION_TV_GLITCH_OGG 107
+#define IDR_VIBESTATION_TV_FEARED_OGG 108
 
 IDI_APP_ICON ICON "vibestation.ico"
 
@@ -13,6 +15,8 @@ IDR_VIBESTATION_CURSOR_WAV RCDATA "ui\\definitive\\sounds\\cursor.wav"
 IDR_VIBESTATION_OPEN_WAV RCDATA "ui\\definitive\\sounds\\open.wav"
 IDR_VIBESTATION_CLOSE_WAV RCDATA "ui\\definitive\\sounds\\close.wav"
 IDR_VIBESTATION_LOGO_WAV RCDATA "ui\\definitive\\sounds\\logo.wav"
+IDR_VIBESTATION_TV_GLITCH_OGG RCDATA "ui\\definitive\\sounds\\fearfulambience.ogg"
+IDR_VIBESTATION_TV_FEARED_OGG RCDATA "ui\\definitive\\sounds\\feared.ogg"
 
 // VibeStation 2 (experimental/ps2/resources/vs2; forward slashes, because
 // rc reads "\r" in "\resources" as an escape). Named rather than numbered:

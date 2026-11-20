@@ -352,14 +352,17 @@ namespace {
         const int tg = (texel >> 5) & 0x1F;
         const int tb = (texel >> 10) & 0x1F;
 
-        const int rr5 = std::min(31, (tr * static_cast<int>(mr)) >> 7);
-        const int rg5 = std::min(31, (tg * static_cast<int>(mg)) >> 7);
-        const int rb5 = std::min(31, (tb * static_cast<int>(mb)) >> 7);
+        // The product is dithered at 8-bit precision, then truncated to 5
+        // bits. (Dithering the already-truncated value would only ever step
+        // down, leaving a dark checkerboard.)
+        const int rr8 = std::min(255, (tr * static_cast<int>(mr)) >> 4);
+        const int rg8 = std::min(255, (tg * static_cast<int>(mg)) >> 4);
+        const int rb8 = std::min(255, (tb * static_cast<int>(mb)) >> 4);
 
         const int d = dither_bias(x, y);
-        const int rr = clamp_u8_i((rr5 << 3) + d) >> 3;
-        const int rg = clamp_u8_i((rg5 << 3) + d) >> 3;
-        const int rb = clamp_u8_i((rb5 << 3) + d) >> 3;
+        const int rr = clamp_u8_i(rr8 + d) >> 3;
+        const int rg = clamp_u8_i(rg8 + d) >> 3;
+        const int rb = clamp_u8_i(rb8 + d) >> 3;
 
         return static_cast<u16>((rr & 0x1F) | ((rg & 0x1F) << 5) |
             ((rb & 0x1F) << 10) | (texel & 0x8000u));
@@ -4038,6 +4041,28 @@ void Gpu::hw_record_polygon(const Vertex *v, int count, bool textured, bool raw)
         hw_sync_texture_pages();
     }
     const GpuHwCommand state = hw_draw_state(textured, raw, false);
+    // Texel range of the whole polygon (both triangles of a quad).
+    u8 limits[4] = {255, 255, 0, 0};
+    for (int i = 0; i < count; ++i) {
+        limits[0] = std::min<u8>(limits[0], static_cast<u8>(v[i].u));
+        limits[1] = std::min<u8>(limits[1], static_cast<u8>(v[i].v));
+        limits[2] = std::max<u8>(limits[2], static_cast<u8>(v[i].u));
+        limits[3] = std::max<u8>(limits[3], static_cast<u8>(v[i].v));
+    }
+    // Right and bottom edges are not drawn, so the texel at the maximum
+    // coordinate is never shown (it belongs to whatever is next in the
+    // atlas); keep it out of the filter too.
+    if (limits[2] > limits[0]) {
+        --limits[2];
+    }
+    if (limits[3] > limits[1]) {
+        --limits[3];
+    }
+    const auto make = [&](const Vertex &vx, bool perspective) {
+        GpuHwVertex out = hw_vertex(vx, perspective);
+        std::copy(limits, limits + 4, out.uv_limits);
+        return out;
+    };
     // Perspective only when every vertex of the triangle carries PGXP depth.
     const auto tri = [&](int i0, int i1, int i2) {
         // Same oversized-primitive rejection as the software rasterizer.
@@ -4045,9 +4070,8 @@ void Gpu::hw_record_polygon(const Vertex *v, int count, bool textured, bool raw)
             return;
         }
         const bool perspective = v[i0].has_w && v[i1].has_w && v[i2].has_w;
-        hw_push_triangle(state, hw_vertex(v[i0], perspective),
-                         hw_vertex(v[i1], perspective),
-                         hw_vertex(v[i2], perspective));
+        hw_push_triangle(state, make(v[i0], perspective), make(v[i1], perspective),
+                         make(v[i2], perspective));
     };
     tri(0, 1, 2);
     if (count == 4) {
